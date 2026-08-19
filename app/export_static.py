@@ -4,8 +4,9 @@ import json
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+from app.aggregator import rebuild_aggregates
 from app.config import ROOT
-from app.db import init_db
+from app.db import SessionLocal, init_db
 from app.main import listings, markets, series, status
 from app.pipeline import reclassify_editions, scrub_buyer_posts
 from app.seed import ensure_ask_seed, ensure_xianyu_snapshot
@@ -13,7 +14,7 @@ from app.seed import ensure_ask_seed, ensure_xianyu_snapshot
 OUT = ROOT / "frontend" / "data"
 SKUS = ("signature", "player_bundle")
 DAYS = (14, 30, 60)
-MPS = ("ALL", "ebay", "bunjang_kr", "bunjang_global", "karrot", "xianyu")
+MPS = ("ALL", "ebay", "bunjang_kr", "bunjang_global", "karrot", "xianyu", "china")
 
 
 def export_snapshot() -> Path:
@@ -22,6 +23,11 @@ def export_snapshot() -> Path:
     scrub_buyer_posts()
     reclassify_editions()
     ensure_xianyu_snapshot()
+    session = SessionLocal()
+    try:
+        rebuild_aggregates(session)
+    finally:
+        session.close()
     OUT.mkdir(parents=True, exist_ok=True)
     snapshot = {
         "generated_at": datetime.now(timezone.utc).isoformat(),

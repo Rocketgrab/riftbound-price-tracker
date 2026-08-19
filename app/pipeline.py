@@ -62,19 +62,43 @@ def scrub_buyer_posts(session: Session | None = None) -> int:
 
 
 def reclassify_editions(session: Session | None = None) -> int:
-    """Re-tag stored asks so language is the product edition, not ad language."""
+    """Re-run product filters on stored rows (T1 set vs singles, edition language)."""
     init_db()
     own = session is None
     session = session or SessionLocal()
     try:
-        from app.classify import edition_language
-
-        rows = session.scalars(select(RawListing).where(RawListing.kept.is_(True))).all()
+        rows = session.scalars(select(RawListing)).all()
         changed = 0
         for row in rows:
-            language = edition_language(row.title, row.marketplace)
-            if row.language != language:
-                row.language = language
+            verdict = classify(row.title, row.marketplace, row.price_usd)
+            listing_type = WTB if verdict.is_wtb else row.listing_type
+            kept = False
+            reason = verdict.reject_reason
+            if verdict.is_wtb:
+                listing_type = WTB
+                reason = "bid"
+            elif not verdict.kept:
+                reason = verdict.reject_reason
+            elif listing_type == "sold" and in_sku_band(verdict.sku, row.price_usd):
+                kept = True
+                reason = None
+            elif listing_type in ASK_TYPES and in_sku_band(verdict.sku, row.price_usd):
+                kept = True
+                reason = None
+            else:
+                reason = reason or "not_ask"
+            if (
+                row.language != verdict.language
+                or row.sku != verdict.sku
+                or row.kept != kept
+                or row.listing_type != listing_type
+                or row.reject_reason != reason
+            ):
+                row.language = verdict.language
+                row.sku = verdict.sku
+                row.kept = kept
+                row.listing_type = listing_type
+                row.reject_reason = reason
                 changed += 1
         if changed:
             session.commit()
@@ -100,6 +124,12 @@ def _ingest(session: Session, result: CollectResult, started: datetime) -> dict:
             reason = "bid"
         elif not verdict.kept:
             reason = verdict.reject_reason
+        elif listing_type == "sold":
+            if in_sku_band(verdict.sku, price_usd):
+                kept_flag = True
+                reason = None
+            else:
+                reason = "price_band"
         elif listing_type not in ASK_TYPES:
             reason = "not_ask"
         elif not in_sku_band(verdict.sku, price_usd):

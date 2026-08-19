@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 
+from datetime import datetime, timedelta
+
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
@@ -18,7 +20,7 @@ def start_scheduler() -> BackgroundScheduler:
     scheduler = BackgroundScheduler()
     scheduler.add_job(
         _job,
-        IntervalTrigger(hours=1),
+        IntervalTrigger(hours=1, start_date=datetime.now() + timedelta(hours=1)),
         id="hourly-collect",
         replace_existing=True,
     )

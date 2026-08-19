@@ -12,9 +12,9 @@ from app.http_util import get_with_retry, json_client, sleep_jitter
 log = logging.getLogger(__name__)
 
 QUERIES = [
-    "Riftbound T1 Signature",
-    "Riftbound T1 bundle Korean",
-    "Riftbound T1 Chinese",
+    "리프트바운드 T1 시그니처",
+    "리프트바운드 T1 한글",
+    "Riftbound T1 한글판",
 ]
 
 
@@ -65,7 +65,7 @@ def _parse_json(payload) -> list[FoundListing]:
         pid = str(item.get("id") or item.get("pid") or "")
         title = str(item.get("title") or item.get("name") or "")
         price = item.get("price") or item.get("salePrice") or 0
-        currency = str(item.get("currency") or "USD")
+        currency = str(item.get("currency") or "KRW")
         try:
             amount = float(price)
         except (TypeError, ValueError):
@@ -100,10 +100,10 @@ def _parse_html(html: str) -> list[FoundListing]:
         if not pid or not price_text:
             continue
         amount = float(price_text.group(1).replace(",", ""))
-        currency = "USD"
+        currency = "KRW"
         token = price_text.group(2)
-        if token in {"KRW", "₩"}:
-            currency = "KRW"
+        if token in {"USD", "$"}:
+            currency = "USD"
         elif token == "CNY":
             currency = "CNY"
         listing_type = "wtb" if is_wtb(title) else "presale"

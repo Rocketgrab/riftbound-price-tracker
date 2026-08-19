@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="styles.css?v=6" />
+    <link rel="stylesheet" href="styles.css?v=11" />
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   </head>
   <body>
@@ -32,7 +32,8 @@
       </header>
 
       <section class="banner" id="phaseBanner">
-        Seller asks only. Want-to-buy posts on the same search pages (구매 / 삽니다 / 求购 / WTB) are dropped so they cannot pull the median down.
+        Seller asks only. Headline numbers are the cheapest kept ask on each edition's home marketplaces.
+        Want-to-buy posts (구매 / 삽니다 / 求购 / WTB) are dropped.
       </section>
 
       <section class="controls">
@@ -59,12 +60,12 @@
             <button class="pill" data-mp="bunjang_kr">Bunjang KR</button>
             <button class="pill" data-mp="bunjang_global">Bunjang Global</button>
             <button class="pill" data-mp="karrot">Karrot</button>
+            <button class="pill" data-mp="china">China</button>
             <button class="pill" data-mp="xianyu">Goofish / Xianyu</button>
           </div>
         </div>
         <div class="group">
           <span class="label">Chart</span>
-          <label class="check"><input id="hlToggle" type="checkbox" /> High / low dots</label>
           <label class="check"><input id="msrpToggle" type="checkbox" checked /> MSRP guides</label>
         </div>
       </section>
@@ -72,15 +73,12 @@
       <section class="stats" id="statCards"></section>
 
       <section class="chart-block">
-        <h2>Marketplaces &amp; cheapest offers</h2>
-        <p class="muted chart-note" id="marketNote">
-          Search links plus the cheapest kept ask in AUD. Collectors and this list refresh every hour while the server is running.
+        <h2>Daily ask candlesticks</h2>
+        <p class="muted chart-note">
+          One candle per edition per day on home marketplaces.
+          Body is previous median → today's median; wick is that day's high / low ask.
+          Hollow body means the median fell.
         </p>
-        <div class="markets" id="marketCards"></div>
-      </section>
-
-      <section class="chart-block">
-        <h2>Median ask by language</h2>
         <div class="chart-wrap chart-wrap--price">
           <canvas id="priceChart"></canvas>
         </div>
@@ -88,10 +86,18 @@
 
       <section class="chart-block">
         <h2>Daily volume by language</h2>
-        <p class="muted chart-note">English, Korean, and Chinese counts sit side by side for each day. Empty dates before listings started are hidden.</p>
+        <p class="muted chart-note">Listing counts and completed sales sit side by side for each edition. Empty dates before activity started are hidden.</p>
         <div class="chart-wrap chart-wrap--volume">
           <canvas id="volumeChart"></canvas>
         </div>
+      </section>
+
+      <section class="chart-block">
+        <h2>Marketplaces &amp; cheapest offers</h2>
+        <p class="muted chart-note" id="marketNote">
+          Cheapest kept ask in AUD. Sites with no kept ask yet are in Marketplace searches below.
+        </p>
+        <div class="markets" id="marketCards"></div>
       </section>
 
       <section class="table-wrap">
@@ -120,10 +126,19 @@
         </div>
       </section>
 
+      <section class="chart-block">
+        <h2>Marketplace searches</h2>
+        <p class="muted chart-note">
+          Each link opens the site with the tracker query already in the search bar.
+          Korean, English, and Chinese titles differ, so a few terms are listed per site.
+        </p>
+        <div class="search-sites" id="searchLinks"></div>
+      </section>
+
       <footer class="foot">
         <span id="runMeta">Collectors refresh every hour. Failures are isolated per marketplace.</span>
       </footer>
     </div>
-    <script src="app.js?v=6"></script>
+    <script src="app.js?v=11"></script>
   </body>
 </html>

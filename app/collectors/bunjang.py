@@ -109,19 +109,42 @@ def _parse(payload: dict) -> tuple[list[FoundListing], list[str]]:
             listing_type = "active"
         if is_wtb(title):
             listing_type = "wtb"
+        ext_id = f"sold-{pid}" if listing_type == "sold" else pid
+        observed_at = datetime.now(timezone.utc)
+        if listing_type == "sold":
+            observed_at = _parse_bunjang_time(item) or observed_at
         out.append(
             FoundListing(
                 marketplace="bunjang_kr",
-                external_id=pid,
+                external_id=ext_id,
                 title=title,
                 price_native=amount,
                 currency="KRW",
                 listing_type=listing_type,
                 url=f"https://m.bunjang.co.kr/products/{pid}",
-                observed_at=datetime.now(timezone.utc),
+                observed_at=observed_at,
             )
         )
     return out, ids
+
+
+def _parse_bunjang_time(item: dict) -> datetime | None:
+    raw = (
+        item.get("update_time")
+        or item.get("updateTime")
+        or item.get("sold_time")
+        or item.get("datetime")
+        or item.get("upd_dt")
+    )
+    if raw is None:
+        return None
+    try:
+        ts = float(raw)
+        if ts > 10_000_000_000:
+            ts /= 1000
+        return datetime.fromtimestamp(ts, tz=timezone.utc)
+    except (TypeError, ValueError, OSError):
+        return None
 
 
 def _dedupe(rows: list[FoundListing]) -> list[FoundListing]:

@@ -41,8 +41,11 @@ def get_with_retry(
                     request=response.request,
                     response=response,
                 )
-            response.raise_for_status()
+            if response.status_code >= 400:
+                raise RuntimeError(f"GET {response.status_code}: {url}")
             return response
+        except RuntimeError:
+            raise
         except Exception as exc:  # noqa: BLE001 — collectors must never crash the job
             last_exc = exc
             time.sleep((2 ** attempt) + random.random())

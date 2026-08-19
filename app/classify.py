@@ -24,10 +24,20 @@ MSRP = {
 }
 
 PRODUCT_RE = re.compile(
-    r"(riftbound|리프트바운드|라이프트바운드|符文战场|符文戰場)",
+    r"(riftbound|리프트\s*바운드|라이프트바운드|符文战场|符文戰場)",
     re.I,
 )
 T1_RE = re.compile(r"(\bt1\b|티원|t1\s*(시그니처|번들|bundle)|签名|簽名)", re.I)
+WORLDS_RE = re.compile(r"(worlds?\s*champion|월드\s*챔피언)", re.I)
+# Single cards and other Riftbound SKUs must not enter the T1 collection series.
+SINGLE_RE = re.compile(
+    r"("
+    r"rengar|pridestalker|overnumbered|over\s*numbered|"
+    r"\bunl-\d|\balt\s*art\b|single\s*card|booster|"
+    r"단품|단카|싱글|单卡|單卡|卡牌(?!套)"
+    r")",
+    re.I,
+)
 
 # Language of the *product edition*, not the language the ad is written in.
 # "Selling Korean version" on eBay is Korean, even though the title is English.
@@ -173,8 +183,14 @@ NEGATIVE_RE = re.compile(
 # eBay / Bunjang Global ads are often written in English while selling KR/CN copies.
 MARKET_EDITION_PRIOR = {
     "bunjang_kr": LANG_KO,
+    "bunjang_global": LANG_KO,
     "karrot": LANG_KO,
     "xianyu": LANG_ZH,
+    "taobao": LANG_ZH,
+    "dewu": LANG_ZH,
+    "zhuanzhuan": LANG_ZH,
+    "jd": LANG_ZH,
+    "weidian": LANG_ZH,
 }
 
 
@@ -218,17 +234,23 @@ def is_wtb(title: str) -> bool:
     return True
 
 
+def is_t1_collection(title: str) -> bool:
+    """True for the T1 Worlds Champion collection, not random Riftbound singles."""
+    text = title or ""
+    if SINGLE_RE.search(text):
+        return False
+    if not PRODUCT_RE.search(text):
+        return False
+    return bool(T1_RE.search(text) or WORLDS_RE.search(text))
+
+
 def classify(title: str, marketplace: str, price_usd: float | None = None) -> Classification:
     text = title or ""
     if is_wtb(text):
         return Classification(SKU_UNKNOWN, LANG_UNKNOWN, False, "wtb", is_wtb=True)
-    if NEGATIVE_RE.search(text):
+    if NEGATIVE_RE.search(text) or SINGLE_RE.search(text):
         return Classification(SKU_UNKNOWN, LANG_UNKNOWN, False, "negative_keyword")
-    if not PRODUCT_RE.search(text) and not (
-        T1_RE.search(text) and re.search(r"(bundle|번들|礼盒|禮盒|시그니처|签名|에디션)", text, re.I)
-    ):
-        return Classification(SKU_UNKNOWN, LANG_UNKNOWN, False, "unrelated")
-    if not (PRODUCT_RE.search(text) or T1_RE.search(text)):
+    if not is_t1_collection(text):
         return Classification(SKU_UNKNOWN, LANG_UNKNOWN, False, "unrelated")
 
     sku = SKU_UNKNOWN

@@ -28,8 +28,6 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -40,20 +38,18 @@ jobs:
         continue-on-error: true
       - name: Export dashboard snapshot
         run: python -m app.export_static
+      - name: Persist database and snapshot
+        run: |
+          git add data/tracker.db frontend/data/snapshot.json
+          if git diff --cached --quiet; then
+            echo "No data changes"
+          else
+            git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "Refresh hourly market snapshot"
+            git push
+          fi
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
           path: frontend
       - id: deployment
         uses: actions/deploy-pages@v4
-      - name: Persist database and snapshot
-        continue-on-error: true
-        run: |
-          git add data/tracker.db frontend/data/snapshot.json
-          if git diff --cached --quiet; then
-            echo "No data changes"
-            exit 0
-          fi
-          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "Refresh hourly market snapshot"
-          git pull --rebase origin main
-          git push

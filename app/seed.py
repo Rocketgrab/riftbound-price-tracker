@@ -22,27 +22,30 @@ PREORDER_CLOSE = date(2026, 8, 18)
 # KR asks ~ ₩1,000,000. eBay asks ~ A$3,000–5,000.
 LANG_META = {
     LANG_EN: {
-        "marketplace_weights": [("ebay_au", 0.85), ("bunjang_global", 0.15)],
-        "native": {"ebay_au": ("AUD", 4000.0), "bunjang_global": ("USD", 2600.0)},
+        "marketplace_weights": [("ebay_au", 1.0)],
+        "native": {"ebay_au": ("AUD", 4000.0)},
         "titles": {
             "ebay_au": "Riftbound T1 Signature Edition English listed",
-            "bunjang_global": "Riftbound T1 Signature EN version for sale",
         },
     },
     LANG_KO: {
-        "marketplace_weights": [("bunjang_kr", 0.8), ("karrot", 0.2)],
-        "native": {"bunjang_kr": ("KRW", 1000000.0), "karrot": ("KRW", 1000000.0)},
+        "marketplace_weights": [("bunjang_kr", 0.7), ("karrot", 0.15), ("bunjang_global", 0.15)],
+        "native": {
+            "bunjang_kr": ("KRW", 1000000.0),
+            "karrot": ("KRW", 1000000.0),
+            "bunjang_global": ("KRW", 1000000.0),
+        },
         "titles": {
             "bunjang_kr": "리프트바운드 T1 시그니처 한글판 팝니다",
             "karrot": "리프트바운드 T1 시그니처 국문 판매",
+            "bunjang_global": "리프트바운드 T1 시그니처 한글판 팝니다",
         },
     },
     LANG_ZH: {
-        "marketplace_weights": [("xianyu", 0.9), ("ebay_au", 0.1)],
-        "native": {"xianyu": ("CNY", 6000.0), "ebay_au": ("AUD", 3500.0)},
+        "marketplace_weights": [("xianyu", 1.0)],
+        "native": {"xianyu": ("CNY", 6000.0)},
         "titles": {
             "xianyu": "符文战场 T1 签名版 中文 在售",
-            "ebay_au": "Riftbound T1 Signature Edition Chinese listed",
         },
     },
 }
@@ -87,9 +90,14 @@ def ensure_ask_seed(session: Session | None = None) -> int:
     try:
         seed_rows = session.scalars(select(RawListing).where(RawListing.source == "seed")).all()
         stale = bool(seed_rows) and (
-            any(row.listing_type != "active" for row in seed_rows)
+            any(row.listing_type not in {"active", "presale", "sold"} for row in seed_rows)
             or any(row.sku == SKU_SIGNATURE and row.price_usd < 450 for row in seed_rows)
             or any(row.marketplace == "ebay" for row in seed_rows)
+            or any(
+                row.marketplace == "bunjang_global"
+                and (row.currency == "USD" or row.language == LANG_EN)
+                for row in seed_rows
+            )
             or any(
                 row.marketplace == "xianyu"
                 and row.sku == SKU_SIGNATURE
@@ -97,6 +105,7 @@ def ensure_ask_seed(session: Session | None = None) -> int:
                 and row.price_native < 5200
                 for row in seed_rows
             )
+            or not any(row.listing_type == "sold" for row in seed_rows)
         )
         if stale:
             session.execute(delete(RawListing).where(RawListing.source == "seed"))
@@ -179,6 +188,40 @@ def seed_if_empty(session: Session | None = None, force: bool = False) -> int:
                         )
                     )
                     inserted += 1
+
+                if random.random() < 0.4:
+                    marketplace = _pick_market(language)
+                    currency, center = LANG_META[language]["native"][marketplace]
+                    native = center * _wave(day, language)
+                    if currency == "KRW":
+                        native = round(native / 10000) * 10000
+                    elif currency == "CNY":
+                        native = round(native / 50) * 50
+                    else:
+                        native = round(native / 10) * 10
+                    sold_n = random.randint(1, 2)
+                    for n in range(sold_n):
+                        listing_id = f"seed-sold-{language}-{marketplace}-{day.isoformat()}-{n}"
+                        session.add(
+                            RawListing(
+                                marketplace=marketplace,
+                                external_id=listing_id,
+                                title=LANG_META[language]["titles"][marketplace],
+                                price_native=native,
+                                currency=currency,
+                                price_usd=to_usd(session, native, currency, day),
+                                listing_type="sold",
+                                sku=SKU_SIGNATURE,
+                                language=language,
+                                url=search_url_for(marketplace, currency),
+                                scraped_at=datetime.combine(day, datetime.min.time()),
+                                observed_on=day,
+                                source="seed",
+                                kept=True,
+                                reject_reason=None,
+                            )
+                        )
+                        inserted += 1
 
                 if day >= date(2026, 8, 16) and random.random() < 0.12:
                     marketplace = _pick_market(language)

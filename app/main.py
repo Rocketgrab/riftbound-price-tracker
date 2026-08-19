@@ -14,7 +14,7 @@ from app.classify import LANG_EN, LANG_KO, LANG_ZH, MSRP, SKU_PLAYER, SKU_SIGNAT
 from app.config import ROOT, settings
 from app.db import CollectRun, DailyAggregate, RawListing, SessionLocal, init_db
 from app.fx import aud_per_usd, convert_amount, to_aud, to_usd
-from app.markets import MARKETPLACES, expand_marketplaces
+from app.markets import HOME_MARKETS, MARKETPLACES, expand_marketplaces, search_catalog
 from app.pipeline import reclassify_editions, run_collection, scrub_buyer_posts
 from app.scheduler import next_run_iso, start_scheduler
 from app.seed import ensure_ask_seed, ensure_xianyu_snapshot
@@ -48,6 +48,11 @@ def on_startup() -> None:
     snap = ensure_xianyu_snapshot()
     if snap:
         log.info("Applied %s Xianyu / Goofish snapshot asks", snap)
+    session = SessionLocal()
+    try:
+        rebuild_aggregates(session)
+    finally:
+        session.close()
     start_scheduler()
     if settings.collect_on_startup:
         run_collection()
@@ -105,7 +110,13 @@ def series(
             "Seller asks in AUD. Buyer bids / want-to-buy posts (삽니다, 구매, WTB) are excluded. "
             "These products have not shipped yet."
         )
-        return _apply_aud(session, payload, sku, end)
+        payload = _apply_aud(session, payload, sku, end)
+        cheapest = _cheapest_by_language(session, sku, mp_filter)
+        payload["cheapest"] = {
+            lang: _listing_payload(session, row, end) if row else None
+            for lang, row in cheapest.items()
+        }
+        return payload
     finally:
         session.close()
 
@@ -114,10 +125,11 @@ def _series_from_aggregates(rows, start: date, end: date) -> dict:
     by_lang = {LANG_EN: {}, LANG_KO: {}, LANG_ZH: {}}
     for row in rows:
         by_lang.setdefault(row.language, {})[row.date.isoformat()] = {
-            "median": row.median_usd,
-            "high": row.high_usd,
-            "low": row.low_usd,
+            "median": row.median_usd if row.sample_count else None,
+            "high": row.high_usd if row.sample_count else None,
+            "low": row.low_usd if row.sample_count else None,
             "volume": row.volume,
+            "sold_volume": row.sold_volume or 0,
             "sample_count": row.sample_count,
         }
     return _fill_days(by_lang, start, end)
@@ -132,24 +144,32 @@ def _series_from_listings(session, sku: str, start: date, end: date, marketplace
         select(RawListing).where(
             RawListing.kept.is_(True),
             RawListing.sku == sku,
-            RawListing.listing_type.in_(("active", "presale")),
+            RawListing.listing_type.in_(("active", "presale", "sold")),
             RawListing.observed_on >= start,
             RawListing.observed_on <= end,
             RawListing.marketplace.in_(marketplaces),
             RawListing.language.in_([LANG_EN, LANG_KO, LANG_ZH]),
         )
     ).all()
-    buckets: dict[tuple, list[float]] = defaultdict(list)
+    ask_buckets: dict[tuple, list[float]] = defaultdict(list)
+    sold_buckets: dict[tuple, int] = defaultdict(int)
     for row in rows:
-        buckets[(row.observed_on, row.language)].append(row.price_usd)
+        key = (row.observed_on, row.language)
+        if row.listing_type == "sold":
+            sold_buckets[key] += 1
+        else:
+            ask_buckets[key].append(row.price_usd)
     by_lang = {LANG_EN: {}, LANG_KO: {}, LANG_ZH: {}}
-    for (day, language), prices in buckets.items():
-        clean = iqr_keep(prices)
+    keys = set(ask_buckets) | set(sold_buckets)
+    for day, language in keys:
+        prices = ask_buckets.get((day, language)) or []
+        clean = iqr_keep(prices) if prices else []
         by_lang[language][day.isoformat()] = {
-            "median": round(median(clean), 2),
-            "high": round(max(clean), 2),
-            "low": round(min(clean), 2),
+            "median": round(median(clean), 2) if clean else None,
+            "high": round(max(clean), 2) if clean else None,
+            "low": round(min(clean), 2) if clean else None,
             "volume": len(prices),
+            "sold_volume": sold_buckets.get((day, language), 0),
             "sample_count": len(clean),
         }
     return _fill_days(by_lang, start, end)
@@ -168,6 +188,7 @@ def _fill_days(by_lang: dict, start: date, end: date) -> dict:
             "high": [by_lang.get(lang, {}).get(d, {}).get("high") for d in dates],
             "low": [by_lang.get(lang, {}).get(d, {}).get("low") for d in dates],
             "volume": [by_lang.get(lang, {}).get(d, {}).get("volume") or 0 for d in dates],
+            "sold_volume": [by_lang.get(lang, {}).get(d, {}).get("sold_volume") or 0 for d in dates],
         }
     return {"dates": dates, "languages": languages}
 
@@ -221,7 +242,7 @@ def listings(
             RawListing.kept.is_(True),
             RawListing.sku == sku,
             RawListing.observed_on == day,
-            RawListing.listing_type.in_(("active", "presale")),
+            RawListing.listing_type.in_(("active", "presale", "sold")),
         )
         if language:
             stmt = stmt.where(RawListing.language == language)
@@ -267,20 +288,42 @@ def markets(sku: str = Query(default=SKU_SIGNATURE)):
             "refresh": "hourly",
             "next_run": next_run_iso(),
             "markets": cards,
+            "searches": search_catalog(sku),
         }
     finally:
         session.close()
 
 
-def _cheapest_for(
-    session, sku: str, marketplace: str, currency: str | None = None
+def _cheapest_by_language(session, sku: str, mp_filter: list[str]) -> dict:
+    out = {}
+    for lang in (LANG_EN, LANG_KO, LANG_ZH):
+        if mp_filter == ["ALL"]:
+            row = _cheapest_row(session, sku, language=lang, marketplaces=list(HOME_MARKETS[lang]))
+            if row is None:
+                row = _cheapest_row(session, sku, language=lang, marketplaces=None)
+        else:
+            row = _cheapest_row(session, sku, language=lang, marketplaces=mp_filter)
+        out[lang] = row
+    return out
+
+
+def _cheapest_row(
+    session,
+    sku: str,
+    *,
+    language: str | None = None,
+    marketplaces: list[str] | None = None,
+    currency: str | None = None,
 ) -> RawListing | None:
     filters = [
         RawListing.kept.is_(True),
         RawListing.sku == sku,
-        RawListing.marketplace == marketplace,
         RawListing.listing_type.in_(("active", "presale")),
     ]
+    if language:
+        filters.append(RawListing.language == language)
+    if marketplaces:
+        filters.append(RawListing.marketplace.in_(marketplaces))
     if currency:
         filters.append(RawListing.currency == currency)
     rows = session.scalars(
@@ -301,6 +344,12 @@ def _cheapest_for(
             best = row
             best_key = key
     return best
+
+
+def _cheapest_for(
+    session, sku: str, marketplace: str, currency: str | None = None
+) -> RawListing | None:
+    return _cheapest_row(session, sku, marketplaces=[marketplace], currency=currency)
 
 
 @app.get("/api/status")

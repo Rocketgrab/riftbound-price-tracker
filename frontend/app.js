@@ -4,11 +4,25 @@ const LANGS = {
   zh: { label: "Chinese", color: "#e0b84f" },
 };
 
+const MARKET_LABELS = {
+  ebay: "eBay",
+  ebay_au: "eBay Australia",
+  ebay_us: "eBay United States",
+  bunjang_kr: "Bunjang KR",
+  bunjang_global: "Bunjang Global",
+  karrot: "Karrot",
+  xianyu: "Xianyu",
+  taobao: "Taobao",
+  dewu: "Dewu",
+  zhuanzhuan: "Zhuanzhuan",
+  jd: "JD.com",
+  weidian: "Weidian",
+};
+
 const state = {
   sku: "signature",
   days: 14,
   marketplaces: "ALL",
-  showHighLow: false,
   showMsrp: true,
   priceChart: null,
   volumeChart: null,
@@ -83,11 +97,6 @@ document.querySelectorAll("#marketPills .pill").forEach((btn) => {
   });
 });
 
-$("hlToggle").addEventListener("change", (e) => {
-  state.showHighLow = e.target.checked;
-  if (state.series) renderCharts(state.series);
-});
-
 $("msrpToggle").addEventListener("change", (e) => {
   state.showMsrp = e.target.checked;
   if (state.series) renderCharts(state.series);
@@ -109,34 +118,43 @@ $("collectBtn").addEventListener("click", async () => {
 });
 
 async function load() {
-  let raw;
-  if (mode === "static") {
-    raw = snapshot?.series?.[state.sku]?.[String(state.days)]?.[state.marketplaces];
-    if (!raw) throw new Error("No snapshot for this view yet.");
-  } else {
-    const params = new URLSearchParams({
-      sku: state.sku,
-      days: String(state.days),
-      marketplaces: state.marketplaces,
+  try {
+    let raw;
+    if (mode === "static") {
+      raw = snapshot?.series?.[state.sku]?.[String(state.days)]?.[state.marketplaces];
+      if (!raw) throw new Error("No snapshot for this view yet.");
+    } else {
+      const params = new URLSearchParams({
+        sku: state.sku,
+        days: String(state.days),
+        marketplaces: state.marketplaces,
+      });
+      const res = await fetch(`/api/series?${params}`);
+      if (!res.ok) throw new Error(`Series ${res.status}`);
+      raw = await res.json();
+    }
+    const data = trimEmptyDates(raw);
+    state.series = data;
+    renderStats(data);
+    renderCharts(data);
+    const last = [...data.dates].reverse().find((d, i) => {
+      const idx = data.dates.length - 1 - i;
+      return hasPoint(data, idx);
     });
-    const res = await fetch(`/api/series?${params}`);
-    raw = await res.json();
+    if (last) selectDay(last);
+    await loadMarkets();
+  } catch (err) {
+    $("collectStatus").textContent = String(err);
+    if (!state.series) throw err;
   }
-  const data = trimEmptyDates(raw);
-  state.series = data;
-  renderStats(data);
-  renderCharts(data);
-  const last = [...data.dates].reverse().find((d, i) => {
-    const idx = data.dates.length - 1 - i;
-    return hasPoint(data, idx);
-  });
-  if (last) selectDay(last);
-  await loadMarkets();
 }
 
 function hasPoint(data, idx) {
   return ["en", "ko", "zh"].some(
-    (lang) => data.languages[lang].median[idx] != null || (data.languages[lang].volume[idx] || 0) > 0
+    (lang) =>
+      data.languages[lang].median[idx] != null ||
+      (data.languages[lang].volume[idx] || 0) > 0 ||
+      (data.languages[lang].sold_volume?.[idx] || 0) > 0
   );
 }
 
@@ -153,6 +171,7 @@ function trimEmptyDates(data) {
       high: cut(data.languages[lang].high),
       low: cut(data.languages[lang].low),
       volume: cut(data.languages[lang].volume),
+      sold_volume: cut(data.languages[lang].sold_volume || []),
     };
   }
   return { ...data, dates: cut(data.dates), languages };
@@ -167,16 +186,21 @@ function shortDate(iso) {
 function renderStats(data) {
   $("statCards").innerHTML = ["en", "ko", "zh"]
     .map((lang) => {
-      const median = findLast(data.languages[lang].median);
+      const cheap = data.cheapest?.[lang];
+      const price = cheap?.price_aud ?? findLast(data.languages[lang].median);
       const msrp = data.msrp?.[lang] || data.msrp_usd?.[lang];
       const msrpAud = msrp?.aud;
-      const delta = median && msrpAud ? (((median - msrpAud) / msrpAud) * 100).toFixed(1) : "—";
+      const delta = price && msrpAud ? (((price - msrpAud) / msrpAud) * 100).toFixed(1) : "—";
       const native = msrp
         ? `${msrp.native.toLocaleString()} ${msrp.currency}`
         : "";
+      const where = cheap
+        ? `${MARKET_LABELS[cheap.marketplace] || cheap.marketplace} · ${Number(cheap.price_native).toLocaleString()} ${cheap.currency}`
+        : "No kept ask yet";
       return `<article class="card">
         <div class="lang" style="color:${LANGS[lang].color}">${LANGS[lang].label} edition</div>
-        <div class="price">${fmtAud(median)}</div>
+        <div class="price">${fmtAud(price)}</div>
+        <div class="vs">Cheapest ${escapeHtml(where)}</div>
         <div class="vs">vs MSRP ${native} (${delta}% in AUD)</div>
       </article>`;
     })
@@ -192,12 +216,14 @@ function findLast(arr) {
 
 function priceBounds(data) {
   const vals = [];
-  for (const lang of ["en", "ko", "zh"]) {
-    for (const key of ["median", "high", "low"]) {
-      for (const v of data.languages[lang][key]) {
-        if (v != null) vals.push(v);
-      }
+  const candles = buildCandles(data);
+  for (const series of candles) {
+    for (const c of series) {
+      if (!c) continue;
+      vals.push(c.h, c.l, c.o, c.c);
     }
+  }
+  for (const lang of ["en", "ko", "zh"]) {
     if (state.showMsrp && data.msrp?.[lang]?.aud) vals.push(data.msrp[lang].aud);
     else if (state.showMsrp && data.msrp_usd?.[lang]?.aud) vals.push(data.msrp_usd[lang].aud);
   }
@@ -223,61 +249,121 @@ function onChartClick(data) {
   };
 }
 
+function prevMedian(row, idx) {
+  for (let i = idx - 1; i >= 0; i -= 1) {
+    if (row.median[i] != null) return row.median[i];
+  }
+  return row.median[idx];
+}
+
+function buildCandles(data) {
+  return ["en", "ko", "zh"].map((lang) => {
+    const row = data.languages[lang];
+    return data.dates.map((_, i) => {
+      const close = row.median[i];
+      const open = prevMedian(row, i);
+      if (close == null && row.high[i] == null && row.low[i] == null) return null;
+      const c = close ?? open;
+      const o = open ?? c;
+      if (o == null || c == null) return null;
+      const high = row.high[i] != null ? row.high[i] : Math.max(o, c);
+      const low = row.low[i] != null ? row.low[i] : Math.min(o, c);
+      return {
+        o,
+        c,
+        h: Math.max(high, o, c),
+        l: Math.min(low, o, c),
+        up: c >= o,
+      };
+    });
+  });
+}
+
+const editionCandles = {
+  id: "editionCandles",
+  afterDatasetsDraw(chart) {
+    const series = chart.options.plugins.editionCandles?.candles;
+    if (!series) return;
+    const xScale = chart.scales.x;
+    const yScale = chart.scales.y;
+    const { ctx } = chart;
+    const langs = ["en", "ko", "zh"];
+    const slot = Math.abs(xScale.getPixelForValue(1) - xScale.getPixelForValue(0)) || 48;
+    const groupW = Math.min(72, slot * 0.78);
+    const step = groupW / langs.length;
+    const bodyW = Math.max(7, step * 0.62);
+
+    ctx.save();
+    series.forEach((candles, li) => {
+      const color = LANGS[langs[li]].color;
+      candles.forEach((candle, i) => {
+        if (!candle) return;
+        const cx = xScale.getPixelForValue(i) + (li - 1) * step;
+        const yH = yScale.getPixelForValue(candle.h);
+        const yL = yScale.getPixelForValue(candle.l);
+        const yO = yScale.getPixelForValue(candle.o);
+        const yC = yScale.getPixelForValue(candle.c);
+        const top = Math.min(yO, yC);
+        const bot = Math.max(yO, yC);
+
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.moveTo(cx, yH);
+        ctx.lineTo(cx, yL);
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.rect(cx - bodyW / 2, top, bodyW, Math.max(2, bot - top));
+        ctx.fillStyle = candle.up ? color : "#0c0d10";
+        ctx.fill();
+        ctx.stroke();
+      });
+    });
+    ctx.restore();
+  },
+};
+
 function renderCharts(data) {
   const labels = data.dates.map(shortDate);
   const bounds = priceBounds(data);
+  const candles = buildCandles(data);
   const priceSets = [];
   const volumeSets = [];
 
-  ["en", "ko", "zh"].forEach((lang) => {
+  ["en", "ko", "zh"].forEach((lang, li) => {
     volumeSets.push({
       type: "bar",
-      label: LANGS[lang].label,
+      label: `${LANGS[lang].label} listings`,
       data: data.languages[lang].volume,
-      backgroundColor: hex(LANGS[lang].color, 0.78),
+      backgroundColor: hex(LANGS[lang].color, 0.82),
       borderColor: LANGS[lang].color,
       borderWidth: 1,
       borderRadius: 4,
       borderSkipped: false,
     });
+    volumeSets.push({
+      type: "bar",
+      label: `${LANGS[lang].label} sales`,
+      data: data.languages[lang].sold_volume || [],
+      backgroundColor: hex(LANGS[lang].color, 0.28),
+      borderColor: LANGS[lang].color,
+      borderWidth: 1.5,
+      borderRadius: 4,
+      borderSkipped: false,
+    });
     priceSets.push({
       type: "line",
-      label: `${LANGS[lang].label} median`,
-      data: data.languages[lang].median,
+      label: LANGS[lang].label,
+      data: candles[li].map((c) => (c ? c.c : null)),
       borderColor: LANGS[lang].color,
-      backgroundColor: hex(LANGS[lang].color, 0.12),
-      fill: false,
-      borderWidth: 3,
-      pointRadius: 5,
-      pointHoverRadius: 8,
-      pointBackgroundColor: LANGS[lang].color,
+      backgroundColor: LANGS[lang].color,
+      showLine: false,
+      borderWidth: 2,
+      pointRadius: 0,
+      pointHoverRadius: 0,
       spanGaps: true,
-      tension: 0.2,
     });
-    if (state.showHighLow) {
-      priceSets.push({
-        type: "line",
-        label: `${LANGS[lang].label} high`,
-        data: data.languages[lang].high,
-        showLine: false,
-        spanGaps: true,
-        pointRadius: 5,
-        pointStyle: "rect",
-        borderColor: LANGS[lang].color,
-        backgroundColor: "transparent",
-      });
-      priceSets.push({
-        type: "line",
-        label: `${LANGS[lang].label} low`,
-        data: data.languages[lang].low,
-        showLine: false,
-        spanGaps: true,
-        pointRadius: 5,
-        pointStyle: "circle",
-        backgroundColor: LANGS[lang].color,
-        borderColor: LANGS[lang].color,
-      });
-    }
     if (state.showMsrp && data.msrp?.[lang]?.aud) {
       priceSets.push({
         type: "line",
@@ -301,20 +387,30 @@ function renderCharts(data) {
       maintainAspectRatio: false,
       interaction: { mode: "index", intersect: false },
       plugins: {
-        legend: { labels: { color: "#ece7dc", boxWidth: 14, padding: 16 } },
+        legend: {
+          labels: {
+            color: "#ece7dc",
+            boxWidth: 14,
+            padding: 16,
+            filter: (item) => !String(item.text || "").includes("MSRP"),
+          },
+        },
         tooltip: {
+          filter: (item) => !String(item.dataset.label || "").includes("MSRP"),
           callbacks: {
             title: (items) => data.dates[items[0]?.dataIndex] || "",
-            afterBody(items) {
-              const idx = items[0]?.dataIndex;
-              if (idx == null) return "";
-              return ["en", "ko", "zh"].map((lang) => {
-                const row = data.languages[lang];
-                return `${LANGS[lang].label}: med ${fmt(row.median[idx])}  hi ${fmt(row.high[idx])}  lo ${fmt(row.low[idx])}`;
-              });
+            label(item) {
+              const lang = ["en", "ko", "zh"].find((key) => LANGS[key].label === item.dataset.label);
+              if (!lang) return "";
+              const li = ["en", "ko", "zh"].indexOf(lang);
+              const candle = candles[li][item.dataIndex];
+              if (!candle) return `${item.dataset.label}: —`;
+              const dir = candle.up ? "up" : "down";
+              return `${item.dataset.label} ${dir}  O ${fmt(candle.o)}  H ${fmt(candle.h)}  L ${fmt(candle.l)}  C ${fmt(candle.c)}`;
             },
           },
         },
+        editionCandles: { candles },
       },
       scales: {
         x: { ...axisStyle(), offset: true },
@@ -328,11 +424,15 @@ function renderCharts(data) {
       },
       onClick: onChartClick(data),
     },
+    plugins: [editionCandles],
   });
 
   const volMax = Math.max(
     4,
-    ...["en", "ko", "zh"].flatMap((lang) => data.languages[lang].volume)
+    ...["en", "ko", "zh"].flatMap((lang) => [
+      ...(data.languages[lang].volume || []),
+      ...(data.languages[lang].sold_volume || []),
+    ])
   );
 
   state.volumeChart = new Chart($("volumeChart"), {
@@ -345,16 +445,20 @@ function renderCharts(data) {
       plugins: {
         legend: { labels: { color: "#ece7dc", boxWidth: 14, padding: 16 } },
         tooltip: {
+          filter: (item) => Number(item.raw) > 0,
           callbacks: {
             title: (items) => data.dates[items[0]?.dataIndex] || "",
             label(item) {
-              return `${item.dataset.label}: ${item.raw} listing${item.raw === 1 ? "" : "s"}`;
+              const kind = String(item.dataset.label || "").toLowerCase().includes("sales")
+                ? "sale"
+                : "listing";
+              return `${item.dataset.label}: ${item.raw} ${kind}${item.raw === 1 ? "" : "s"}`;
             },
           },
         },
       },
       datasets: {
-        bar: { categoryPercentage: 0.62, barPercentage: 0.86 },
+        bar: { categoryPercentage: 0.72, barPercentage: 0.88 },
       },
       scales: {
         x: { stacked: false, offset: true, ...axisStyle() },
@@ -364,7 +468,7 @@ function renderCharts(data) {
           max: volMax + 1,
           ticks: { ...axisStyle().ticks, stepSize: 1 },
           grid: { color: "#2a2e38" },
-          title: { display: true, text: "Listings", color: "#9a9386" },
+          title: { display: true, text: "Listings / sales", color: "#9a9386" },
         },
       },
       onClick: onChartClick(data),
@@ -430,24 +534,23 @@ async function loadMarkets() {
       ? "Search links plus the cheapest kept ask in AUD. This public snapshot refreshes every hour."
       : "Search links plus the cheapest kept ask in AUD. Collectors and this list refresh every hour while the server is running.") +
     next;
-  $("marketCards").innerHTML = (data.markets || [])
+  const withAsk = (data.markets || []).filter((market) => market.cheapest);
+  $("marketCards").innerHTML = withAsk
     .map((market) => {
       const cheap = market.cheapest;
-      const href = cheap ? offerUrl(cheap.url, market.search_url) : market.search_url;
-      const price = cheap
-        ? `<div class="cheap">${fmtAud(cheap.price_aud)}</div>
-           <div class="native">${Number(cheap.price_native).toLocaleString()} ${cheap.currency} · ${escapeHtml(cheap.title)}</div>`
-        : `<div class="native">No kept ask yet. Use the search link.</div>`;
+      const href = offerUrl(cheap.url, market.search_url);
       return `<article class="card market-card">
         <h3>${escapeHtml(market.label)}</h3>
         <div class="links">
           <a href="${market.search_url}" target="_blank" rel="noreferrer">Open marketplace</a>
           <a href="${href}" target="_blank" rel="noreferrer">Cheapest offer</a>
         </div>
-        ${price}
+        <div class="cheap">${fmtAud(cheap.price_aud)}</div>
+        <div class="native">${Number(cheap.price_native).toLocaleString()} ${cheap.currency} · ${escapeHtml(cheap.title)}</div>
       </article>`;
     })
-    .join("");
+    .join("") || `<p class="muted">No kept asks yet. Use Marketplace searches below.</p>`;
+  renderSearchLinks(data.searches);
 }
 
 async function selectDay(day) {
@@ -484,6 +587,29 @@ async function selectDay(day) {
         <td>${fmtAud(row.price_aud ?? row.price_usd)}</td>
         <td>${row.listing_type}</td>
       </tr>`;
+    })
+    .join("");
+}
+
+function renderSearchLinks(sites) {
+  const root = $("searchLinks");
+  if (!root) return;
+  if (!sites || !sites.length) {
+    root.innerHTML = `<p class="muted">No search links yet.</p>`;
+    return;
+  }
+  root.innerHTML = sites
+    .map((site) => {
+      const chips = (site.queries || [])
+        .map((query) => {
+          const label = query.site ? `${query.term} · ${query.site}` : query.term;
+          return `<a class="search-chip" href="${query.url}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`;
+        })
+        .join("");
+      return `<article class="card search-card">
+        <h3>${escapeHtml(site.label)}</h3>
+        <div class="search-chips">${chips}</div>
+      </article>`;
     })
     .join("");
 }

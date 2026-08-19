@@ -56,10 +56,12 @@ def _collect_ebay(marketplace: str, host: str, currency: str, global_id: str) ->
     listings: list[FoundListing] = []
     try:
         if settings.ebay_app_id:
-            listings.extend(_via_finding_api(marketplace, currency, global_id))
+            listings.extend(_via_finding_api(marketplace, currency, global_id, sold=False))
+            listings.extend(_via_finding_api(marketplace, currency, global_id, sold=True))
         else:
-            listings.extend(_via_html(marketplace, host, currency))
-        listings = [row for row in listings if row.listing_type in {"active", "wtb"}]
+            listings.extend(_via_html(marketplace, host, currency, sold=False))
+            listings.extend(_via_html(marketplace, host, currency, sold=True))
+        listings = [row for row in listings if row.listing_type in {"active", "wtb", "sold"}]
         error = None if listings else f"{marketplace} returned no public results"
         return CollectResult(
             marketplace,
@@ -72,12 +74,16 @@ def _collect_ebay(marketplace: str, host: str, currency: str, global_id: str) ->
         return CollectResult(marketplace, listings=_dedupe(listings), error=str(exc))
 
 
-def _via_finding_api(marketplace: str, default_ccy: str, global_id: str) -> list[FoundListing]:
+def _via_finding_api(
+    marketplace: str, default_ccy: str, global_id: str, sold: bool = False
+) -> list[FoundListing]:
     out: list[FoundListing] = []
     url = "https://svcs.ebay.com/services/search/FindingService/v1"
+    operation = "findCompletedItems" if sold else "findItemsAdvanced"
+    response_key = "findCompletedItemsResponse" if sold else "findItemsAdvancedResponse"
     for query in QUERIES:
         params = {
-            "OPERATION-NAME": "findItemsAdvanced",
+            "OPERATION-NAME": operation,
             "SERVICE-VERSION": "1.13.0",
             "SECURITY-APPNAME": settings.ebay_app_id,
             "RESPONSE-DATA-FORMAT": "JSON",
@@ -88,10 +94,13 @@ def _via_finding_api(marketplace: str, default_ccy: str, global_id: str) -> list
             "itemFilter(0).value": "FixedPrice",
             "paginationInput.entriesPerPage": "50",
         }
+        if sold:
+            params["itemFilter(1).name"] = "SoldItemsOnly"
+            params["itemFilter(1).value"] = "true"
         with json_client() as client:
             res = get_with_retry(client, url, params=params)
         payload = res.json()
-        search = (payload.get("findItemsAdvancedResponse") or [{}])[0]
+        search = (payload.get(response_key) or [{}])[0]
         items = search.get("searchResult", [{}])[0].get("item") or []
         for item in items:
             try:
@@ -104,15 +113,18 @@ def _via_finding_api(marketplace: str, default_ccy: str, global_id: str) -> list
                 listing_url = (item.get("viewItemURL") or [""])[0]
                 if amount <= 0:
                     continue
+                listing_type = "wtb" if is_wtb(title) else ("sold" if sold else "active")
+                end_time = ((item.get("listingInfo") or [{}])[0].get("endTime") or [None])[0]
                 out.append(
                     FoundListing(
                         marketplace=marketplace,
-                        external_id=listing_id,
+                        external_id=f"sold-{listing_id}" if listing_type == "sold" else listing_id,
                         title=title,
                         price_native=amount,
                         currency=currency,
-                        listing_type="wtb" if is_wtb(title) else "active",
+                        listing_type=listing_type,
                         url=listing_url,
+                        observed_at=_parse_iso_datetime(end_time) if sold else None,
                     )
                 )
             except (TypeError, ValueError, KeyError):
@@ -121,10 +133,10 @@ def _via_finding_api(marketplace: str, default_ccy: str, global_id: str) -> list
     return out
 
 
-def _via_html(marketplace: str, host: str, default_ccy: str) -> list[FoundListing]:
+def _via_html(marketplace: str, host: str, default_ccy: str, sold: bool = False) -> list[FoundListing]:
     out: list[FoundListing] = []
     query = quote_plus("Riftbound T1 Signature")
-    extra = "LH_BIN=1&_sop=15&_ipg=60"
+    extra = "LH_Complete=1&LH_Sold=1&_sop=13&_ipg=60" if sold else "LH_BIN=1&_sop=15&_ipg=60"
     headers = {
         "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
         "Referer": host.replace("/sch/i.html", "/"),
@@ -134,21 +146,21 @@ def _via_html(marketplace: str, host: str, default_ccy: str) -> list[FoundListin
         try:
             res = get_with_retry(client, url, headers=headers)
         except Exception as exc:
-            log.info("eBay HTML ask search failed %s: %s", host, exc)
+            log.info("eBay HTML %s search failed %s: %s", "sold" if sold else "ask", host, exc)
             return out
         soup = BeautifulSoup(res.text, "lxml")
         cards = soup.select("li.s-card, .s-item, li[id^='item']")
         for item in cards:
-            parsed = _parse_card(item, marketplace, default_ccy)
+            parsed = _parse_card(item, marketplace, default_ccy, sold=sold)
             if parsed:
                 out.append(parsed)
         if not out:
-            out.extend(_from_embedded_json(res.text, marketplace, default_ccy))
+            out.extend(_from_embedded_json(res.text, marketplace, default_ccy, sold=sold))
         sleep_jitter()
     return out
 
 
-def _parse_card(item, marketplace: str, default_ccy: str) -> FoundListing | None:
+def _parse_card(item, marketplace: str, default_ccy: str, sold: bool = False) -> FoundListing | None:
     title_el = item.select_one(".s-item__title, .s-card__title, [role='heading']")
     price_el = item.select_one(".s-item__price, .s-card__price, .su-styled-text.positive")
     link_el = item.select_one("a.s-item__link, a.s-card__link, a[href*='/itm/']")
@@ -158,25 +170,29 @@ def _parse_card(item, marketplace: str, default_ccy: str) -> FoundListing | None
     if title.lower().startswith("shop on ebay"):
         return None
     blob = item.get_text(" ", strip=True)
-    if re.search(r"\bsold\b|\bended\b", blob, re.I):
+    if not sold and re.search(r"\bsold\b|\bended\b", blob, re.I):
         return None
     amount, currency = _parse_price(price_el.get_text(" ", strip=True), default_ccy)
     if amount is None:
         return None
     href = link_el.get("href") or ""
     listing_id = _id_from_url(href) or title[:40]
+    listing_type = "wtb" if is_wtb(title) else ("sold" if sold else "active")
     return FoundListing(
         marketplace=marketplace,
-        external_id=listing_id,
+        external_id=f"sold-{listing_id}" if listing_type == "sold" else listing_id,
         title=title,
         price_native=amount,
         currency=currency,
-        listing_type="wtb" if is_wtb(title) else "active",
+        listing_type=listing_type,
         url=href,
+        observed_at=_parse_sold_date(blob) if sold else None,
     )
 
 
-def _from_embedded_json(html: str, marketplace: str, default_ccy: str) -> list[FoundListing]:
+def _from_embedded_json(
+    html: str, marketplace: str, default_ccy: str, sold: bool = False
+) -> list[FoundListing]:
     out: list[FoundListing] = []
     for match in re.finditer(r'"itemId"\s*:\s*"(\d+)".{0,400}?"title"\s*:\s*"([^"]+)"', html):
         listing_id, title = match.group(1), match.group(2)
@@ -187,14 +203,15 @@ def _from_embedded_json(html: str, marketplace: str, default_ccy: str) -> list[F
         )
         if not price_match:
             continue
+        listing_type = "wtb" if is_wtb(title) else ("sold" if sold else "active")
         out.append(
             FoundListing(
                 marketplace=marketplace,
-                external_id=listing_id,
+                external_id=f"sold-{listing_id}" if listing_type == "sold" else listing_id,
                 title=title,
                 price_native=float(price_match.group(1)),
                 currency=default_ccy,
-                listing_type="wtb" if is_wtb(title) else "active",
+                listing_type=listing_type,
                 url=f"https://www.ebay.com/itm/{listing_id}"
                 if marketplace == "ebay_us"
                 else f"https://www.ebay.com.au/itm/{listing_id}",
@@ -225,6 +242,15 @@ def _parse_price(text: str, default_ccy: str) -> tuple[float | None, str]:
         return float(cleaned), currency
     except ValueError:
         return None, currency
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError:
+        return None
 
 
 def _parse_sold_date(text: str) -> datetime | None:

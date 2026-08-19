@@ -10,7 +10,9 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     create_engine,
+    text,
 )
+
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from app.config import ROOT, settings
@@ -66,6 +68,7 @@ class DailyAggregate(Base):
     median_usd: Mapped[float] = mapped_column(Float)
     volume: Mapped[int] = mapped_column(Integer)
     sample_count: Mapped[int] = mapped_column(Integer)
+    sold_volume: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class FxRate(Base):
@@ -94,7 +97,7 @@ def make_engine():
     (ROOT / "data").mkdir(exist_ok=True)
     return create_engine(
         settings.database_url,
-        connect_args={"check_same_thread": False},
+        connect_args={"check_same_thread": False, "timeout": 30},
         future=True,
     )
 
@@ -105,3 +108,7 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, futu
 
 def init_db() -> None:
     Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(daily_aggregates)"))}
+        if "sold_volume" not in cols:
+            conn.execute(text("ALTER TABLE daily_aggregates ADD COLUMN sold_volume INTEGER DEFAULT 0"))
