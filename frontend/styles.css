@@ -1,0 +1,201 @@
+:root {
+  --bg: #0c0d10;
+  --panel: #14161c;
+  --line: #262a33;
+  --text: #ece7dc;
+  --muted: #9a9386;
+  --en: #6ea8fe;
+  --ko: #ff4b4b;
+  --zh: #e0b84f;
+  --accent: #d9c4a0;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); }
+body {
+  font-family: "IBM Plex Sans", sans-serif;
+  min-height: 100vh;
+}
+
+.frame {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 28px 20px 48px;
+}
+
+.top {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  align-items: flex-start;
+}
+
+.kicker {
+  margin: 0 0 6px;
+  color: var(--ko);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+h1 {
+  margin: 0;
+  font-size: 34px;
+  letter-spacing: -0.03em;
+}
+
+.sub { color: var(--muted); max-width: 640px; line-height: 1.5; }
+
+.top-actions { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+#collectBtn, .pill {
+  border: 1px solid var(--line);
+  background: #101218;
+  color: var(--text);
+}
+
+#collectBtn {
+  padding: 10px 14px;
+  border-radius: 8px;
+}
+
+.banner {
+  margin: 20px 0;
+  padding: 12px 14px;
+  border-left: 3px solid var(--zh);
+  background: #19150c;
+  color: #ead9a8;
+  font-size: 14px;
+}
+
+.controls {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.group { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.label {
+  width: 110px;
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.pills { display: flex; flex-wrap: wrap; gap: 6px; }
+.pill {
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 13px;
+}
+.pill.on {
+  background: #2a1c1c;
+  border-color: var(--ko);
+  color: #fff;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin: 16px 0;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px 16px;
+}
+.card .lang { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }
+.card .price {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 28px;
+  margin: 6px 0 2px;
+}
+.card .vs { color: var(--muted); font-size: 13px; }
+
+.markets {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+.market-card h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.market-card .links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  margin-bottom: 10px;
+  font-size: 13px;
+}
+
+.market-card .cheap {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 18px;
+  margin: 4px 0 2px;
+}
+
+.market-card .native {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.chart-block { margin-top: 16px; }
+.chart-block h2 { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
+.chart-note { margin: 0 0 8px; font-size: 13px; }
+.chart-wrap {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px 16px 12px;
+}
+.chart-wrap--price { height: 340px; }
+.chart-wrap--volume { height: 280px; }
+
+.table-wrap { margin-top: 18px; }
+.table-head h2 { margin: 0 0 4px; font-size: 18px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 500; }
+.lang-en { color: var(--en); }
+.lang-ko { color: var(--ko); }
+.lang-zh { color: var(--zh); }
+.muted { color: var(--muted); }
+.foot { margin-top: 22px; color: var(--muted); font-size: 12px; }
+
+a { color: var(--accent); }
+
+@media (max-width: 800px) {
+  .top { flex-direction: column; }
+  .stats,
+  .markets { grid-template-columns: 1fr; }
+  .label { width: 100%; }
+  .chart-wrap--price { height: 280px; }
+  .chart-wrap--volume { height: 240px; }
+}
