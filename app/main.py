@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,6 +18,7 @@ from app.markets import HOME_MARKETS, MARKETPLACES, expand_marketplaces, search_
 from app.pipeline import reclassify_editions, run_collection, scrub_buyer_posts
 from app.scheduler import next_run_iso, start_scheduler
 from app.seed import ensure_ask_seed, ensure_xianyu_snapshot
+from app.stats import iqr_keep, median
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -107,8 +108,9 @@ def series(
         payload["sku"] = sku
         payload["phase"] = "presale"
         payload["note"] = (
-            "Seller asks in AUD. Buyer bids / want-to-buy posts (삽니다, 구매, WTB) are excluded. "
-            "These products have not shipped yet."
+            "Headline prices are the median completed sale in the last 24 hours "
+            "on each edition's home marketplaces. Buyer bids / want-to-buy posts "
+            "(삽니다, 구매, WTB) are excluded."
         )
         payload = _apply_aud(session, payload, sku, end)
         cheapest = _cheapest_by_language(session, sku, mp_filter)
@@ -116,6 +118,8 @@ def series(
             lang: _listing_payload(session, row, end) if row else None
             for lang, row in cheapest.items()
         }
+        payload["sold_24h"] = _median_sold_24h(session, sku, mp_filter, end)
+        payload["refresh"] = "hourly"
         return payload
     finally:
         session.close()
@@ -137,8 +141,6 @@ def _series_from_aggregates(rows, start: date, end: date) -> dict:
 
 def _series_from_listings(session, sku: str, start: date, end: date, marketplaces: list[str]) -> dict:
     from collections import defaultdict
-
-    from app.stats import iqr_keep, median
 
     rows = session.scalars(
         select(RawListing).where(
@@ -292,6 +294,83 @@ def markets(sku: str = Query(default=SKU_SIGNATURE)):
         }
     finally:
         session.close()
+
+
+def _sold_window_start() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=24)
+
+
+def _sold_at(row: RawListing) -> datetime:
+    """Date-only sales are treated as noon UTC on the observed day."""
+    return datetime.combine(row.observed_on, datetime.min.time()) + timedelta(hours=12)
+
+
+def _pack_sold_median(session, rows: list[RawListing], day: date, *, stale: bool, as_of=None, window_hours: int | None = None) -> dict | None:
+    prices = [row.price_usd for row in rows]
+    clean = iqr_keep(prices) if prices else []
+    if not clean:
+        return None
+    med = median(clean)
+    native_row = min(rows, key=lambda row: abs(row.price_usd - med))
+    return {
+        "price_usd": round(med, 2),
+        "price_aud": to_aud(session, med, day),
+        "sample_count": len(rows),
+        "marketplaces": sorted({row.marketplace for row in rows}),
+        "currency": native_row.currency,
+        "price_native": native_row.price_native,
+        "window_hours": window_hours,
+        "stale": stale,
+        "as_of": (as_of or max(row.observed_on for row in rows)).isoformat(),
+        "source": "live" if any(row.source != "seed" for row in rows) else "seed",
+    }
+
+
+def _sold_query(session, sku: str, lang: str, markets: list[str] | None, live_only: bool):
+    filters = [
+        RawListing.kept.is_(True),
+        RawListing.sku == sku,
+        RawListing.language == lang,
+        RawListing.listing_type == "sold",
+    ]
+    if live_only:
+        filters.append(RawListing.source != "seed")
+    else:
+        filters.append(RawListing.source == "seed")
+    if markets:
+        filters.append(RawListing.marketplace.in_(markets))
+    return session.scalars(select(RawListing).where(*filters)).all()
+
+
+def _median_sold_24h(session, sku: str, mp_filter: list[str], day: date) -> dict:
+    """24h median sold, else the last printed sold median for that edition."""
+    cutoff = _sold_window_start()
+    out: dict = {}
+    for lang in (LANG_EN, LANG_KO, LANG_ZH):
+        markets = None if mp_filter == ["ALL"] else mp_filter
+        live = _sold_query(session, sku, lang, markets, live_only=True)
+        in_window = [row for row in live if _sold_at(row) >= cutoff]
+        packed = _pack_sold_median(session, in_window, day, stale=False, window_hours=24)
+        if packed:
+            out[lang] = packed
+            continue
+        if live:
+            latest = max(row.observed_on for row in live)
+            last_day = [row for row in live if row.observed_on == latest]
+            out[lang] = _pack_sold_median(
+                session, last_day, day, stale=True, as_of=latest, window_hours=None
+            )
+            continue
+        seed = _sold_query(session, sku, lang, markets, live_only=False)
+        if seed:
+            latest = max(row.observed_on for row in seed)
+            last_day = [row for row in seed if row.observed_on == latest]
+            out[lang] = _pack_sold_median(
+                session, last_day, day, stale=True, as_of=latest, window_hours=None
+            )
+        else:
+            out[lang] = None
+    return out
 
 
 def _cheapest_by_language(session, sku: str, mp_filter: list[str]) -> dict:

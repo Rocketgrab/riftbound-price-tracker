@@ -160,6 +160,9 @@ def _ingest(session: Session, result: CollectResult, started: datetime) -> dict:
             reject_reason=reason,
         )
         if existing:
+            # Re-scrapes of completed sales must not reset the sold day to "today".
+            if listing_type == "sold" and found.observed_at is None:
+                payload.pop("observed_on", None)
             for key, value in payload.items():
                 setattr(existing, key, value)
         else:

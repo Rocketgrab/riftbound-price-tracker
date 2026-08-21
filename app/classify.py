@@ -166,6 +166,9 @@ NEGATIVE_RE = re.compile(
             r"\bbox\s*only\b",
             r"\bproxy\s*card",
             r"\bdamaged\b",
+            r"framed\s*pic",
+            r"\bposter\b",
+            r"photo\s*print",
             r"공박스",
             r"빈박스",
             r"분할\s*판매",
@@ -180,8 +183,12 @@ NEGATIVE_RE = re.compile(
 )
 
 # Only local-language marketplaces default an unlabeled listing to that edition.
-# eBay / Bunjang Global ads are often written in English while selling KR/CN copies.
+# After the English drawing, unlabeled eBay ads are almost always the EN set.
+# Bunjang Global ads are often written in English while selling KR copies.
 MARKET_EDITION_PRIOR = {
+    "ebay": LANG_EN,
+    "ebay_au": LANG_EN,
+    "ebay_us": LANG_EN,
     "bunjang_kr": LANG_KO,
     "bunjang_global": LANG_KO,
     "karrot": LANG_KO,

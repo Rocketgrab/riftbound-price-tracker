@@ -24,10 +24,11 @@ const state = {
   days: 14,
   marketplaces: "ALL",
   showMsrp: true,
-  priceChart: null,
+  priceCharts: [],
   volumeChart: null,
   series: null,
   selectedDay: null,
+  crossIndex: null,
 };
 
 function $(id) {
@@ -121,8 +122,14 @@ async function load() {
   try {
     let raw;
     if (mode === "static") {
+      const snapRes = await fetch("data/snapshot.json", { cache: "no-store" });
+      snapshot = await snapRes.json();
       raw = snapshot?.series?.[state.sku]?.[String(state.days)]?.[state.marketplaces];
       if (!raw) throw new Error("No snapshot for this view yet.");
+      if ($("runMeta") && snapshot.generated_at) {
+        $("runMeta").textContent =
+          "Data refreshes every hour. Last snapshot " + snapshot.generated_at.replace("T", " ").replace("Z", " UTC");
+      }
     } else {
       const params = new URLSearchParams({
         sku: state.sku,
@@ -183,25 +190,63 @@ function shortDate(iso) {
   return `${Number(day)} ${months[Number(month) - 1]}`;
 }
 
+function soldHeadlineKey(lang) {
+  return `riftboundSoldHeadline:${state.sku}:${lang}`;
+}
+
+function rememberSold(lang, sold) {
+  try {
+    if (sold && sold.price_aud != null) {
+      localStorage.setItem(soldHeadlineKey(lang), JSON.stringify(sold));
+    }
+  } catch {
+    /* ignore private-mode storage */
+  }
+}
+
+function lastPrintedSold(lang) {
+  try {
+    const raw = localStorage.getItem(soldHeadlineKey(lang));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed?.price_aud != null ? { ...parsed, carried: true } : null;
+  } catch {
+    return null;
+  }
+}
+
 function renderStats(data) {
   $("statCards").innerHTML = ["en", "ko", "zh"]
     .map((lang) => {
-      const cheap = data.cheapest?.[lang];
-      const price = cheap?.price_aud ?? findLast(data.languages[lang].median);
+      let sold = data.sold_24h?.[lang] || lastPrintedSold(lang);
+      if (sold) rememberSold(lang, sold);
+      const price = sold?.price_aud ?? null;
       const msrp = data.msrp?.[lang] || data.msrp_usd?.[lang];
       const msrpAud = msrp?.aud;
-      const delta = price && msrpAud ? (((price - msrpAud) / msrpAud) * 100).toFixed(1) : "—";
+      const delta = price && msrpAud ? (((price - msrpAud) / msrpAud) * 100).toFixed(1) : null;
       const native = msrp
         ? `${msrp.native.toLocaleString()} ${msrp.currency}`
         : "";
-      const where = cheap
-        ? `${MARKET_LABELS[cheap.marketplace] || cheap.marketplace} · ${Number(cheap.price_native).toLocaleString()} ${cheap.currency}`
-        : "No kept ask yet";
+      const count = sold?.sample_count || 0;
+      const sales = count === 1 ? "1 sale" : `${count} sales`;
+      let where = "No sales recorded yet";
+      if (sold?.carried) {
+        where = `Last printed median · ${sales}`;
+      } else if (sold && !sold.stale && sold.window_hours === 24) {
+        where = `Median sold · last 24h · ${sales}`;
+      } else if (sold?.as_of) {
+        where = `Last sold median · ${sold.as_of} · ${sales}`;
+      } else if (sold) {
+        where = `Last sold median · ${sales}`;
+      }
+      const vs = native
+        ? (delta == null ? `vs MSRP ${native}` : `vs MSRP ${native} (${delta}% in AUD)`)
+        : "";
       return `<article class="card">
         <div class="lang" style="color:${LANGS[lang].color}">${LANGS[lang].label} edition</div>
         <div class="price">${fmtAud(price)}</div>
-        <div class="vs">Cheapest ${escapeHtml(where)}</div>
-        <div class="vs">vs MSRP ${native} (${delta}% in AUD)</div>
+        <div class="vs">${escapeHtml(where)}</div>
+        <div class="vs">${vs}</div>
       </article>`;
     })
     .join("");
@@ -214,19 +259,15 @@ function findLast(arr) {
   return null;
 }
 
-function priceBounds(data) {
+function priceBoundsFor(data, lang) {
   const vals = [];
-  const candles = buildCandles(data);
-  for (const series of candles) {
-    for (const c of series) {
-      if (!c) continue;
-      vals.push(c.h, c.l, c.o, c.c);
-    }
+  const li = ["en", "ko", "zh"].indexOf(lang);
+  for (const c of buildCandles(data)[li] || []) {
+    if (!c) continue;
+    vals.push(c.h, c.l, c.o, c.c);
   }
-  for (const lang of ["en", "ko", "zh"]) {
-    if (state.showMsrp && data.msrp?.[lang]?.aud) vals.push(data.msrp[lang].aud);
-    else if (state.showMsrp && data.msrp_usd?.[lang]?.aud) vals.push(data.msrp_usd[lang].aud);
-  }
+  if (state.showMsrp && data.msrp?.[lang]?.aud) vals.push(data.msrp[lang].aud);
+  else if (state.showMsrp && data.msrp_usd?.[lang]?.aud) vals.push(data.msrp_usd[lang].aud);
   if (!vals.length) return { min: 0, max: 100 };
   const lo = Math.min(...vals);
   const hi = Math.max(...vals);
@@ -283,22 +324,23 @@ const editionCandles = {
   id: "editionCandles",
   afterDatasetsDraw(chart) {
     const series = chart.options.plugins.editionCandles?.candles;
+    const langs = chart.options.plugins.editionCandles?.langs || ["en", "ko", "zh"];
     if (!series) return;
     const xScale = chart.scales.x;
     const yScale = chart.scales.y;
     const { ctx } = chart;
-    const langs = ["en", "ko", "zh"];
     const slot = Math.abs(xScale.getPixelForValue(1) - xScale.getPixelForValue(0)) || 48;
+    const n = Math.max(series.length, 1);
     const groupW = Math.min(72, slot * 0.78);
-    const step = groupW / langs.length;
-    const bodyW = Math.max(7, step * 0.62);
+    const step = n > 1 ? groupW / n : 0;
+    const bodyW = n > 1 ? Math.max(7, step * 0.62) : Math.max(12, Math.min(36, slot * 0.42));
 
     ctx.save();
     series.forEach((candles, li) => {
       const color = LANGS[langs[li]].color;
       candles.forEach((candle, i) => {
         if (!candle) return;
-        const cx = xScale.getPixelForValue(i) + (li - 1) * step;
+        const cx = xScale.getPixelForValue(i) + (n > 1 ? (li - (n - 1) / 2) * step : 0);
         const yH = yScale.getPixelForValue(candle.h);
         const yL = yScale.getPixelForValue(candle.l);
         const yO = yScale.getPixelForValue(candle.o);
@@ -324,14 +366,96 @@ const editionCandles = {
   },
 };
 
+const OHLC_IDS = { en: "ohlcEn", ko: "ohlcKo", zh: "ohlcZh" };
+
+function indexFromEvent(chart, event) {
+  const xScale = chart.scales.x;
+  if (!xScale || event.x == null) return null;
+  const value = xScale.getValueForPixel(event.x);
+  if (value == null || Number.isNaN(Number(value))) return null;
+  const max = (chart.data.labels || []).length - 1;
+  if (max < 0) return null;
+  return Math.max(0, Math.min(max, Math.round(value)));
+}
+
+function writeOhlc(lang, index, data, candle) {
+  const el = $(OHLC_IDS[lang]);
+  if (!el) return;
+  const date = data.dates[index];
+  if (!date) {
+    el.textContent = "";
+    return;
+  }
+  if (!candle) {
+    el.textContent = `${shortDate(date)}  —`;
+    return;
+  }
+  el.textContent = `${shortDate(date)}  O ${fmt(candle.o)}  H ${fmt(candle.h)}  L ${fmt(candle.l)}  C ${fmt(candle.c)}`;
+}
+
+function applyCrosshair(index, sourceChart, y) {
+  state.crossIndex = index;
+  const data = state.series;
+  const candles = data ? buildCandles(data) : null;
+  const charts = [...(state.priceCharts || []), state.volumeChart].filter(Boolean);
+  charts.forEach((chart) => {
+    chart.$crossIndex = index;
+    chart.$crossY = chart === sourceChart ? y : null;
+    if (chart !== sourceChart) chart.draw();
+  });
+  if (data && candles && index != null) {
+    ["en", "ko", "zh"].forEach((lang, li) => writeOhlc(lang, index, data, candles[li][index]));
+  }
+}
+
+const chartCrosshair = {
+  id: "chartCrosshair",
+  afterEvent(chart, args) {
+    const event = args.event;
+    if (!event) return;
+    if (event.type === "mouseout") return;
+    if (!["mousemove", "click", "touchstart", "touchmove"].includes(event.type)) return;
+    if (event.x == null) return;
+    const area = chart.chartArea;
+    if (event.x < area.left || event.x > area.right) return;
+    const index = indexFromEvent(chart, event);
+    if (index == null) return;
+    const y = event.y >= area.top && event.y <= area.bottom ? event.y : null;
+    applyCrosshair(index, chart, y);
+    args.changed = true;
+  },
+  afterDatasetsDraw(chart) {
+    const index = chart.$crossIndex;
+    if (index == null) return;
+    const xScale = chart.scales.x;
+    const area = chart.chartArea;
+    const x = xScale.getPixelForValue(index);
+    const { ctx } = chart;
+    ctx.save();
+    ctx.strokeStyle = "rgba(236, 231, 220, 0.38)";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.moveTo(x, area.top);
+    ctx.lineTo(x, area.bottom);
+    ctx.stroke();
+    if (chart.$crossY != null) {
+      ctx.beginPath();
+      ctx.moveTo(area.left, chart.$crossY);
+      ctx.lineTo(area.right, chart.$crossY);
+      ctx.stroke();
+    }
+    ctx.restore();
+  },
+};
+
 function renderCharts(data) {
   const labels = data.dates.map(shortDate);
-  const bounds = priceBounds(data);
   const candles = buildCandles(data);
-  const priceSets = [];
   const volumeSets = [];
+  const canvasIds = { en: "priceChartEn", ko: "priceChartKo", zh: "priceChartZh" };
 
-  ["en", "ko", "zh"].forEach((lang, li) => {
+  ["en", "ko", "zh"].forEach((lang) => {
     volumeSets.push({
       type: "bar",
       label: `${LANGS[lang].label} listings`,
@@ -352,20 +476,29 @@ function renderCharts(data) {
       borderRadius: 4,
       borderSkipped: false,
     });
-    priceSets.push({
-      type: "line",
-      label: LANGS[lang].label,
-      data: candles[li].map((c) => (c ? c.c : null)),
-      borderColor: LANGS[lang].color,
-      backgroundColor: LANGS[lang].color,
-      showLine: false,
-      borderWidth: 2,
-      pointRadius: 0,
-      pointHoverRadius: 0,
-      spanGaps: true,
-    });
+  });
+
+  (state.priceCharts || []).forEach((chart) => chart.destroy());
+  if (state.volumeChart) state.volumeChart.destroy();
+
+  state.priceCharts = ["en", "ko", "zh"].map((lang, li) => {
+    const bounds = priceBoundsFor(data, lang);
+    const datasets = [
+      {
+        type: "line",
+        label: LANGS[lang].label,
+        data: candles[li].map((c) => (c ? c.c : null)),
+        borderColor: LANGS[lang].color,
+        backgroundColor: LANGS[lang].color,
+        showLine: false,
+        borderWidth: 2,
+        pointRadius: 0,
+        pointHoverRadius: 0,
+        spanGaps: true,
+      },
+    ];
     if (state.showMsrp && data.msrp?.[lang]?.aud) {
-      priceSets.push({
+      datasets.push({
         type: "line",
         label: `${LANGS[lang].label} MSRP`,
         data: data.dates.map(() => data.msrp[lang].aud),
@@ -375,56 +508,32 @@ function renderCharts(data) {
         borderWidth: 1.5,
       });
     }
-  });
-
-  if (state.priceChart) state.priceChart.destroy();
-  if (state.volumeChart) state.volumeChart.destroy();
-
-  state.priceChart = new Chart($("priceChart"), {
-    data: { labels, datasets: priceSets },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      interaction: { mode: "index", intersect: false },
-      plugins: {
-        legend: {
-          labels: {
-            color: "#ece7dc",
-            boxWidth: 14,
-            padding: 16,
-            filter: (item) => !String(item.text || "").includes("MSRP"),
+    return new Chart($(canvasIds[lang]), {
+      data: { labels, datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        events: ["mousemove", "mouseout", "click", "touchstart", "touchmove", "touchend"],
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: { enabled: false },
+          editionCandles: { candles: [candles[li]], langs: [lang] },
+        },
+        scales: {
+          x: { ...axisStyle(), offset: true },
+          y: {
+            ...axisStyle(),
+            min: bounds.min,
+            max: bounds.max,
+            title: { display: true, text: "AUD", color: "#9a9386" },
+            ticks: { ...axisStyle().ticks, callback: (v) => "A$" + v },
           },
         },
-        tooltip: {
-          filter: (item) => !String(item.dataset.label || "").includes("MSRP"),
-          callbacks: {
-            title: (items) => data.dates[items[0]?.dataIndex] || "",
-            label(item) {
-              const lang = ["en", "ko", "zh"].find((key) => LANGS[key].label === item.dataset.label);
-              if (!lang) return "";
-              const li = ["en", "ko", "zh"].indexOf(lang);
-              const candle = candles[li][item.dataIndex];
-              if (!candle) return `${item.dataset.label}: —`;
-              const dir = candle.up ? "up" : "down";
-              return `${item.dataset.label} ${dir}  O ${fmt(candle.o)}  H ${fmt(candle.h)}  L ${fmt(candle.l)}  C ${fmt(candle.c)}`;
-            },
-          },
-        },
-        editionCandles: { candles },
+        onClick: onChartClick(data),
       },
-      scales: {
-        x: { ...axisStyle(), offset: true },
-        y: {
-          ...axisStyle(),
-          min: bounds.min,
-          max: bounds.max,
-          title: { display: true, text: "AUD", color: "#9a9386" },
-          ticks: { ...axisStyle().ticks, callback: (v) => "A$" + v },
-        },
-      },
-      onClick: onChartClick(data),
-    },
-    plugins: [editionCandles],
+      plugins: [editionCandles, chartCrosshair],
+    });
   });
 
   const volMax = Math.max(
@@ -441,21 +550,11 @@ function renderCharts(data) {
     options: {
       responsive: true,
       maintainAspectRatio: false,
+      events: ["mousemove", "mouseout", "click", "touchstart", "touchmove", "touchend"],
       interaction: { mode: "index", intersect: false },
       plugins: {
         legend: { labels: { color: "#ece7dc", boxWidth: 14, padding: 16 } },
-        tooltip: {
-          filter: (item) => Number(item.raw) > 0,
-          callbacks: {
-            title: (items) => data.dates[items[0]?.dataIndex] || "",
-            label(item) {
-              const kind = String(item.dataset.label || "").toLowerCase().includes("sales")
-                ? "sale"
-                : "listing";
-              return `${item.dataset.label}: ${item.raw} ${kind}${item.raw === 1 ? "" : "s"}`;
-            },
-          },
-        },
+        tooltip: { enabled: false },
       },
       datasets: {
         bar: { categoryPercentage: 0.72, barPercentage: 0.88 },
@@ -473,8 +572,14 @@ function renderCharts(data) {
       },
       onClick: onChartClick(data),
     },
-    plugins: [volumeValueLabels],
+    plugins: [volumeValueLabels, chartCrosshair],
   });
+
+  const startIndex =
+    state.selectedDay && data.dates.includes(state.selectedDay)
+      ? data.dates.indexOf(state.selectedDay)
+      : data.dates.length - 1;
+  if (startIndex >= 0) applyCrosshair(startIndex, null, null);
 }
 
 const volumeValueLabels = {

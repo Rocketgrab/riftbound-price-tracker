@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="styles.css?v=11" />
+    <link rel="stylesheet" href="styles.css?v=15" />
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   </head>
   <body>
@@ -20,9 +20,10 @@
           <p class="kicker">Cross-border · presale market</p>
           <h1>Riftbound × T1</h1>
           <p class="sub">
-            English, Korean, and Chinese *editions* as three AUD ask series
+            English, Korean, and Chinese *editions* as three AUD series
             (not the language the listing is written in).
-            Buyer bids (삽니다 / 구매 / WTB) are excluded. Sets have not shipped yet.
+            Headline cards use the median completed sale in the last 24 hours.
+            Buyer bids (삽니다 / 구매 / WTB) are excluded.
           </p>
         </div>
         <div class="top-actions">
@@ -32,7 +33,7 @@
       </header>
 
       <section class="banner" id="phaseBanner">
-        Seller asks only. Headline numbers are the cheapest kept ask on each edition's home marketplaces.
+        Headline numbers are the median sold price over the last 24 hours on each edition's home marketplaces, refreshed hourly.
         Want-to-buy posts (구매 / 삽니다 / 求购 / WTB) are dropped.
       </section>
 
@@ -75,12 +76,38 @@
       <section class="chart-block">
         <h2>Daily ask candlesticks</h2>
         <p class="muted chart-note">
-          One candle per edition per day on home marketplaces.
+          One chart per edition, each on its own AUD scale so English highs do not flatten Korean and Chinese.
           Body is previous median → today's median; wick is that day's high / low ask.
           Hollow body means the median fell.
         </p>
-        <div class="chart-wrap chart-wrap--price">
-          <canvas id="priceChart"></canvas>
+        <div class="price-charts">
+          <div>
+            <div class="chart-head">
+              <h3 class="chart-lang chart-lang--en">English edition</h3>
+              <p class="chart-ohlc" id="ohlcEn"></p>
+            </div>
+            <div class="chart-wrap chart-wrap--price">
+              <canvas id="priceChartEn"></canvas>
+            </div>
+          </div>
+          <div>
+            <div class="chart-head">
+              <h3 class="chart-lang chart-lang--ko">Korean edition</h3>
+              <p class="chart-ohlc" id="ohlcKo"></p>
+            </div>
+            <div class="chart-wrap chart-wrap--price">
+              <canvas id="priceChartKo"></canvas>
+            </div>
+          </div>
+          <div>
+            <div class="chart-head">
+              <h3 class="chart-lang chart-lang--zh">Chinese edition</h3>
+              <p class="chart-ohlc" id="ohlcZh"></p>
+            </div>
+            <div class="chart-wrap chart-wrap--price">
+              <canvas id="priceChartZh"></canvas>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -103,7 +130,7 @@
       <section class="table-wrap">
         <div class="table-head">
           <h2>Listings for <span id="selectedDay">—</span></h2>
-          <p class="muted">Click a date on the chart. Values are converted to AUD using that day's FX snapshot.</p>
+          <p class="muted">Tap or drag a date on a chart. Values are converted to AUD using that day's FX snapshot.</p>
         </div>
         <div class="table-scroll">
           <table>
@@ -139,6 +166,6 @@
         <span id="runMeta">Collectors refresh every hour. Failures are isolated per marketplace.</span>
       </footer>
     </div>
-    <script src="app.js?v=11"></script>
+    <script src="app.js?v=15"></script>
   </body>
 </html>

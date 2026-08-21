@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote_plus
 
 from bs4 import BeautifulSoup
@@ -16,9 +16,10 @@ log = logging.getLogger(__name__)
 
 QUERIES = [
     "Riftbound T1 Signature",
+    "Riftbound T1 Signature English",
     "Riftbound T1 Signature Korean",
     "Riftbound T1 Signature Chinese",
-    "Riftbound T1 Signature English",
+    "Riftbound T1 Worlds Champion",
 ]
 
 ASK_HOSTS = [
@@ -135,59 +136,89 @@ def _via_finding_api(
 
 def _via_html(marketplace: str, host: str, default_ccy: str, sold: bool = False) -> list[FoundListing]:
     out: list[FoundListing] = []
-    query = quote_plus("Riftbound T1 Signature")
     extra = "LH_Complete=1&LH_Sold=1&_sop=13&_ipg=60" if sold else "LH_BIN=1&_sop=15&_ipg=60"
     headers = {
         "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
         "Referer": host.replace("/sch/i.html", "/"),
     }
+    kind = "sold" if sold else "ask"
+    hosts = [host]
+    if sold and "ebay.com.au" in host:
+        hosts.append("https://www.ebay.com/sch/i.html")
     with json_client() as client:
-        url = f"{host}?_nkw={query}&{extra}"
-        try:
-            res = get_with_retry(client, url, headers=headers)
-        except Exception as exc:
-            log.info("eBay HTML %s search failed %s: %s", "sold" if sold else "ask", host, exc)
-            return out
-        soup = BeautifulSoup(res.text, "lxml")
-        cards = soup.select("li.s-card, .s-item, li[id^='item']")
-        for item in cards:
-            parsed = _parse_card(item, marketplace, default_ccy, sold=sold)
-            if parsed:
-                out.append(parsed)
-        if not out:
-            out.extend(_from_embedded_json(res.text, marketplace, default_ccy, sold=sold))
-        sleep_jitter()
+        for search_host in hosts:
+            for query in QUERIES:
+                url = f"{search_host}?_nkw={quote_plus(query)}&{extra}"
+                try:
+                    res = get_with_retry(client, url, headers=headers, attempts=2)
+                except Exception as exc:
+                    log.info("eBay HTML %s search failed %s %s: %s", kind, search_host, query, exc)
+                    continue
+                soup = BeautifulSoup(res.text, "lxml")
+                cards = soup.select("li.s-card, .s-item, li[id^='item']")
+                page_rows = []
+                for item in cards:
+                    page_rows.extend(_parse_card(item, marketplace, default_ccy, sold=sold))
+                if not page_rows:
+                    page_rows = _from_embedded_json(res.text, marketplace, default_ccy, sold=sold)
+                out.extend(page_rows)
+                sleep_jitter(1.0, 2.2)
     return out
 
 
-def _parse_card(item, marketplace: str, default_ccy: str, sold: bool = False) -> FoundListing | None:
+def _parse_card(item, marketplace: str, default_ccy: str, sold: bool = False) -> list[FoundListing]:
     title_el = item.select_one(".s-item__title, .s-card__title, [role='heading']")
     price_el = item.select_one(".s-item__price, .s-card__price, .su-styled-text.positive")
     link_el = item.select_one("a.s-item__link, a.s-card__link, a[href*='/itm/']")
     if not title_el or not price_el or not link_el:
-        return None
+        return []
     title = title_el.get_text(" ", strip=True)
+    title = re.sub(r"\s*Opens in a new window or tab\s*", " ", title, flags=re.I).strip()
     if title.lower().startswith("shop on ebay"):
-        return None
+        return []
     blob = item.get_text(" ", strip=True)
-    if not sold and re.search(r"\bsold\b|\bended\b", blob, re.I):
-        return None
     amount, currency = _parse_price(price_el.get_text(" ", strip=True), default_ccy)
     if amount is None:
-        return None
+        return []
     href = link_el.get("href") or ""
     listing_id = _id_from_url(href) or title[:40]
-    listing_type = "wtb" if is_wtb(title) else ("sold" if sold else "active")
-    return FoundListing(
-        marketplace=marketplace,
-        external_id=f"sold-{listing_id}" if listing_type == "sold" else listing_id,
-        title=title,
-        price_native=amount,
-        currency=currency,
-        listing_type=listing_type,
-        url=href,
-        observed_at=_parse_sold_date(blob) if sold else None,
-    )
+    sold_at = _parse_sold_date(blob)
+    qty_match = re.search(r"\b(\d+)\s+sold\b", blob, re.I)
+    qty = int(qty_match.group(1)) if qty_match else 0
+    if is_wtb(title):
+        listing_type = "wtb"
+    elif sold or sold_at:
+        listing_type = "sold"
+    else:
+        listing_type = "active"
+    rows = [
+        FoundListing(
+            marketplace=marketplace,
+            external_id=f"sold-{listing_id}" if listing_type == "sold" else listing_id,
+            title=title,
+            price_native=amount,
+            currency=currency,
+            listing_type=listing_type,
+            url=href,
+            observed_at=sold_at,
+        )
+    ]
+    # Sold-item search redirects to login. Unit-sold counts on live BIN cards
+    # are the public completed-sale signal we can still read.
+    if listing_type == "active" and qty >= 1:
+        rows.append(
+            FoundListing(
+                marketplace=marketplace,
+                external_id=f"soldqty-{listing_id}",
+                title=title,
+                price_native=amount,
+                currency=currency,
+                listing_type="sold",
+                url=href,
+                observed_at=datetime.utcnow(),
+            )
+        )
+    return rows
 
 
 def _from_embedded_json(
@@ -254,8 +285,25 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
 
 
 def _parse_sold_date(text: str) -> datetime | None:
+    now = datetime.utcnow()
+    rel = re.search(
+        r"(?:sold|ended)?\s*(\d+)\s*(minutes?|mins?|hours?|hrs?|h|days?)\s+ago",
+        text,
+        re.I,
+    )
+    if rel:
+        n = int(rel.group(1))
+        unit = rel.group(2).lower()
+        if unit.startswith("min"):
+            return now - timedelta(minutes=n)
+        if unit.startswith("h"):
+            return now - timedelta(hours=n)
+        if unit.startswith("day"):
+            return now - timedelta(days=n)
+
     match = re.search(
-        r"sold\s+(\d{1,2})\s+([A-Za-z]{3,9})\s*,?\s*(\d{4})|sold\s+([A-Za-z]{3,9})\s+(\d{1,2}),?\s*(\d{4})",
+        r"(?:sold|ended)\s+(\d{1,2})\s+([A-Za-z]{3,9})\s*,?\s*(\d{4})?"
+        r"|(?:sold|ended)\s+([A-Za-z]{3,9})\s+(\d{1,2}),?\s*(\d{4})?",
         text,
         re.I,
     )
@@ -263,13 +311,17 @@ def _parse_sold_date(text: str) -> datetime | None:
         return None
     try:
         if match.group(1):
-            day, month_s, year = int(match.group(1)), match.group(2), int(match.group(3))
+            day, month_s, year_s = int(match.group(1)), match.group(2), match.group(3)
         else:
-            month_s, day, year = match.group(4), int(match.group(5)), int(match.group(6))
+            month_s, day, year_s = match.group(4), int(match.group(5)), match.group(6)
         month = MONTHS.get(month_s[:3].lower())
         if not month:
             return None
-        return datetime(year, month, day)
+        year = int(year_s) if year_s else now.year
+        parsed = datetime(year, month, day)
+        if parsed > now + timedelta(days=1):
+            parsed = datetime(year - 1, month, day)
+        return parsed
     except (TypeError, ValueError):
         return None
 
