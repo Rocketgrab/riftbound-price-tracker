@@ -349,7 +349,9 @@ function buildCandles(data) {
       const open = prevMedian(row, i);
       let candle = null;
       if (close == null && row.high[i] == null && row.low[i] == null) {
-        if (last) candle = { o: last.c, c: last.c, h: last.c, l: last.c, up: true };
+        if (last && (row.volume[i] || 0) > 0) {
+          candle = { o: last.c, c: last.c, h: last.c, l: last.c, up: true };
+        }
       } else {
         const c = close ?? open ?? last?.c;
         const o = open ?? c;

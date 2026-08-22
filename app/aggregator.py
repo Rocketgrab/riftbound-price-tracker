@@ -15,6 +15,59 @@ SKUS = (SKU_SIGNATURE, SKU_PLAYER)
 LANGS = (LANG_EN, LANG_KO, LANG_ZH)
 MARKETPLACES = ("ebay", "ebay_au", "ebay_us", "bunjang_kr", "bunjang_global", "karrot", "xianyu", "taobao", "dewu", "zhuanzhuan", "jd", "weidian")
 
+# Recovered from the 20 Aug 2026 17:26 UTC snapshot before leftover solds
+# overwrote that day's ask book (median 0, volume 0). Values are USD.
+WIPED_ASK_DAYS = (
+    {
+        "date": date(2026, 8, 20),
+        "marketplace": "ALL",
+        "sku": SKU_SIGNATURE,
+        "language": LANG_KO,
+        "median_usd": 1149.85,
+        "high_usd": 1437.32,
+        "low_usd": 862.39,
+        "volume": 65,
+        "sample_count": 65,
+        "sold_volume": 6,
+    },
+    {
+        "date": date(2026, 8, 20),
+        "marketplace": "bunjang_kr",
+        "sku": SKU_SIGNATURE,
+        "language": LANG_KO,
+        "median_usd": 1149.85,
+        "high_usd": 1437.32,
+        "low_usd": 862.39,
+        "volume": 65,
+        "sample_count": 65,
+        "sold_volume": 6,
+    },
+    {
+        "date": date(2026, 8, 20),
+        "marketplace": "ALL",
+        "sku": SKU_SIGNATURE,
+        "language": LANG_ZH,
+        "median_usd": 892.38,
+        "high_usd": 966.74,
+        "low_usd": 847.76,
+        "volume": 5,
+        "sample_count": 5,
+        "sold_volume": 0,
+    },
+    {
+        "date": date(2026, 8, 20),
+        "marketplace": "xianyu",
+        "sku": SKU_SIGNATURE,
+        "language": LANG_ZH,
+        "median_usd": 892.38,
+        "high_usd": 966.74,
+        "low_usd": 847.76,
+        "volume": 5,
+        "sample_count": 5,
+        "sold_volume": 0,
+    },
+)
+
 
 def rebuild_aggregates(session: Session, day: date | None = None) -> int:
     query = select(RawListing).where(
@@ -46,19 +99,18 @@ def rebuild_aggregates(session: Session, day: date | None = None) -> int:
                 ask_buckets[key].append(row.price_usd)
 
     keys = set(ask_buckets) | set(sold_buckets)
-    listing_dates = {key[0] for key in keys}
+    ask_dates = {key[0] for key in ask_buckets}
     today = date.today()
     existing_dates = set(session.scalars(select(DailyAggregate.date).distinct()).all())
 
-    # Re-scrapes move active listings onto "today". Wiping every aggregate row
-    # would erase historical candles. Freeze days already stored; rewrite today
-    # and any date that still has listings but no snapshot yet (seed / solds).
+    # Re-scrapes used to move active listings onto "today". Do not rebuild a
+    # past day from leftover solds only — that writes median 0 / volume 0.
     if day:
         dates_to_write = {day}
     elif not existing_dates:
-        dates_to_write = listing_dates or {today}
+        dates_to_write = ask_dates or {today}
     else:
-        dates_to_write = {today} | (listing_dates - existing_dates)
+        dates_to_write = {today} | (ask_dates - existing_dates)
 
     if dates_to_write:
         session.execute(delete(DailyAggregate).where(DailyAggregate.date.in_(dates_to_write)))
@@ -70,6 +122,9 @@ def rebuild_aggregates(session: Session, day: date | None = None) -> int:
             continue
         prices = ask_buckets.get(key) or []
         clean = iqr_keep(prices) if prices else []
+        sold_volume = sold_buckets.get(key, 0)
+        if not clean and not sold_volume:
+            continue
         session.add(
             DailyAggregate(
                 date=agg_date,
@@ -81,9 +136,31 @@ def rebuild_aggregates(session: Session, day: date | None = None) -> int:
                 median_usd=round(median(clean), 2) if clean else 0,
                 volume=len(prices),
                 sample_count=len(clean),
-                sold_volume=sold_buckets.get(key, 0),
+                sold_volume=sold_volume,
             )
         )
         written += 1
+    written += _restore_wiped_ask_days(session)
     session.commit()
+    return written
+
+
+def _restore_wiped_ask_days(session: Session) -> int:
+    written = 0
+    for spec in WIPED_ASK_DAYS:
+        existing = session.scalar(
+            select(DailyAggregate).where(
+                DailyAggregate.date == spec["date"],
+                DailyAggregate.marketplace == spec["marketplace"],
+                DailyAggregate.sku == spec["sku"],
+                DailyAggregate.language == spec["language"],
+            )
+        )
+        if existing and existing.sample_count:
+            continue
+        if existing:
+            session.delete(existing)
+            session.flush()
+        session.add(DailyAggregate(**spec))
+        written += 1
     return written

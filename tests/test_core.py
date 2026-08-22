@@ -39,21 +39,38 @@ class StatsTests(unittest.TestCase):
 
 
 class CarryGapTests(unittest.TestCase):
-    def test_fills_interior_nulls_from_last_median(self):
+    def test_fills_interior_nulls_when_that_day_had_volume(self):
         row = _carry_price_gaps(
             {
                 "median": [100.0, None, 110.0],
                 "high": [120.0, None, 130.0],
                 "low": [90.0, None, 100.0],
+                "volume": [2, 4, 2],
             }
         )
         self.assertEqual(row["median"], [100.0, 100.0, 110.0])
         self.assertEqual(row["high"], [120.0, 100.0, 130.0])
         self.assertEqual(row["low"], [90.0, 100.0, 100.0])
 
+    def test_does_not_invent_ohlc_on_zero_volume_days(self):
+        row = _carry_price_gaps(
+            {
+                "median": [100.0, None, 110.0],
+                "high": [120.0, None, 130.0],
+                "low": [90.0, None, 100.0],
+                "volume": [2, 0, 2],
+            }
+        )
+        self.assertEqual(row["median"], [100.0, None, 110.0])
+
     def test_leaves_leading_nulls(self):
         row = _carry_price_gaps(
-            {"median": [None, 50.0], "high": [None, 60.0], "low": [None, 40.0]}
+            {
+                "median": [None, 50.0],
+                "high": [None, 60.0],
+                "low": [None, 40.0],
+                "volume": [0, 2],
+            }
         )
         self.assertIsNone(row["median"][0])
         self.assertEqual(row["median"][1], 50.0)
