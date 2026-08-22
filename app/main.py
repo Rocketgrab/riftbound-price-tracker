@@ -221,14 +221,12 @@ def _fill_days(by_lang: dict, start: date, end: date) -> dict:
 
 
 def _carry_price_gaps(row: dict) -> dict:
-    """Do not invent OHLC on days with no asks. Keep the last close for later opens."""
+    """Carry the last close through interior empty days so charts stay continuous."""
     last_m = last_h = last_l = None
     medians: list[float | None] = []
     highs: list[float | None] = []
     lows: list[float | None] = []
-    volumes = row.get("volume") or []
-    for i, (median, high, low) in enumerate(zip(row["median"], row["high"], row["low"])):
-        vol = volumes[i] if i < len(volumes) else 0
+    for median, high, low in zip(row["median"], row["high"], row["low"]):
         if median is not None or high is not None or low is not None:
             last_m = median if median is not None else last_m
             last_h = high if high is not None else last_h
@@ -236,7 +234,7 @@ def _carry_price_gaps(row: dict) -> dict:
             medians.append(median if median is not None else last_m)
             highs.append(high if high is not None else last_h)
             lows.append(low if low is not None else last_l)
-        elif last_m is not None and vol:
+        elif last_m is not None:
             medians.append(last_m)
             highs.append(last_m)
             lows.append(last_m)

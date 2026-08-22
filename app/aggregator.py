@@ -66,6 +66,30 @@ WIPED_ASK_DAYS = (
         "sample_count": 5,
         "sold_volume": 0,
     },
+    {
+        "date": date(2026, 8, 21),
+        "marketplace": "ALL",
+        "sku": SKU_SIGNATURE,
+        "language": LANG_ZH,
+        "median_usd": 892.38,
+        "high_usd": 966.74,
+        "low_usd": 847.76,
+        "volume": 5,
+        "sample_count": 5,
+        "sold_volume": 0,
+    },
+    {
+        "date": date(2026, 8, 21),
+        "marketplace": "xianyu",
+        "sku": SKU_SIGNATURE,
+        "language": LANG_ZH,
+        "median_usd": 892.38,
+        "high_usd": 966.74,
+        "low_usd": 847.76,
+        "volume": 5,
+        "sample_count": 5,
+        "sold_volume": 0,
+    },
 )
 
 

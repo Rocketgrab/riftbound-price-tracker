@@ -52,7 +52,7 @@ class CarryGapTests(unittest.TestCase):
         self.assertEqual(row["high"], [120.0, 100.0, 130.0])
         self.assertEqual(row["low"], [90.0, 100.0, 100.0])
 
-    def test_does_not_invent_ohlc_on_zero_volume_days(self):
+    def test_carries_close_through_zero_volume_interior_days(self):
         row = _carry_price_gaps(
             {
                 "median": [100.0, None, 110.0],
@@ -61,7 +61,9 @@ class CarryGapTests(unittest.TestCase):
                 "volume": [2, 0, 2],
             }
         )
-        self.assertEqual(row["median"], [100.0, None, 110.0])
+        self.assertEqual(row["median"], [100.0, 100.0, 110.0])
+        self.assertEqual(row["high"], [120.0, 100.0, 130.0])
+        self.assertEqual(row["low"], [90.0, 100.0, 100.0])
 
     def test_leaves_leading_nulls(self):
         row = _carry_price_gaps(
