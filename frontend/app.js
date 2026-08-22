@@ -24,6 +24,7 @@ const state = {
   days: 14,
   marketplaces: "ALL",
   showMsrp: true,
+  listingLang: "en",
   priceCharts: [],
   volumeChart: null,
   series: null,
@@ -37,6 +38,8 @@ function $(id) {
 
 let mode = "live";
 let snapshot = null;
+let loadGen = 0;
+let listingGen = 0;
 
 function isEbayFilter() {
   return state.marketplaces === "ebay";
@@ -62,6 +65,7 @@ async function detectMode() {
   }
   mode = "static";
   const res = await fetch("data/snapshot.json", { cache: "no-store" });
+  if (!res.ok) throw new Error(`Snapshot ${res.status}`);
   snapshot = await res.json();
   $("collectBtn").hidden = true;
   $("collectStatus").textContent = "Public site · collectors run every hour";
@@ -98,15 +102,30 @@ document.querySelectorAll("#marketPills .pill").forEach((btn) => {
   });
 });
 
+document.querySelectorAll("#listingLangPills .pill").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll("#listingLangPills .pill").forEach((b) => b.classList.remove("on"));
+    btn.classList.add("on");
+    state.listingLang = btn.dataset.lang;
+    if (state.selectedDay) selectDay(state.selectedDay);
+  });
+});
+
 $("msrpToggle").addEventListener("change", (e) => {
   state.showMsrp = e.target.checked;
   if (state.series) renderCharts(state.series);
 });
 
 $("collectBtn").addEventListener("click", async () => {
+  const btn = $("collectBtn");
+  btn.disabled = true;
   $("collectStatus").textContent = "Collecting… live marketplaces may time out or block.";
   try {
     const res = await fetch("/api/collect", { method: "POST" });
+    if (res.status === 409) {
+      $("collectStatus").textContent = "Collectors already running.";
+      return;
+    }
     const data = await res.json();
     const summary = (data.reports || [])
       .map((r) => `${r.marketplace}: ${r.status} (${r.kept})`)
@@ -115,14 +134,18 @@ $("collectBtn").addEventListener("click", async () => {
     await load();
   } catch (err) {
     $("collectStatus").textContent = String(err);
+  } finally {
+    btn.disabled = false;
   }
 });
 
 async function load() {
+  const gen = ++loadGen;
   try {
     let raw;
     if (mode === "static") {
       const snapRes = await fetch("data/snapshot.json", { cache: "no-store" });
+      if (!snapRes.ok) throw new Error(`Snapshot ${snapRes.status}`);
       snapshot = await snapRes.json();
       raw = snapshot?.series?.[state.sku]?.[String(state.days)]?.[state.marketplaces];
       if (!raw) throw new Error("No snapshot for this view yet.");
@@ -140,6 +163,7 @@ async function load() {
       if (!res.ok) throw new Error(`Series ${res.status}`);
       raw = await res.json();
     }
+    if (gen !== loadGen) return;
     const data = trimEmptyDates(raw);
     state.series = data;
     renderStats(data);
@@ -151,6 +175,7 @@ async function load() {
     if (last) selectDay(last);
     await loadMarkets();
   } catch (err) {
+    if (gen !== loadGen) return;
     $("collectStatus").textContent = String(err);
     if (!state.series) throw err;
   }
@@ -218,8 +243,9 @@ function lastPrintedSold(lang) {
 function renderStats(data) {
   $("statCards").innerHTML = ["en", "ko", "zh"]
     .map((lang) => {
-      let sold = data.sold_24h?.[lang] || lastPrintedSold(lang);
-      if (sold) rememberSold(lang, sold);
+      let sold = data.sold_24h?.[lang];
+      if (!sold) sold = lastPrintedSold(lang);
+      else if (sold.kind !== "ask" && sold.source !== "seed") rememberSold(lang, sold);
       const price = sold?.price_aud ?? null;
       const msrp = data.msrp?.[lang] || data.msrp_usd?.[lang];
       const msrpAud = msrp?.aud;
@@ -229,8 +255,11 @@ function renderStats(data) {
         : "";
       const count = sold?.sample_count || 0;
       const sales = count === 1 ? "1 sale" : `${count} sales`;
+      const listings = count === 1 ? "1 listing" : `${count} listings`;
       let where = "No sales recorded yet";
-      if (sold?.carried) {
+      if (sold?.kind === "ask") {
+        where = `Median ask · ${sold.as_of || "today"} · ${listings}`;
+      } else if (sold?.carried) {
         where = `Last printed median · ${sales}`;
       } else if (sold && !sold.stale && sold.window_hours === 24) {
         where = `Median sold · last 24h · ${sales}`;
@@ -282,6 +311,20 @@ function axisStyle() {
   };
 }
 
+function xAxis(data) {
+  const dense = (data?.dates || []).length > 21;
+  return {
+    ...axisStyle(),
+    offset: true,
+    ticks: {
+      ...axisStyle().ticks,
+      autoSkip: dense,
+      maxRotation: dense ? 45 : 0,
+      minRotation: 0,
+    },
+  };
+}
+
 function onChartClick(data) {
   return (_evt, _elts, chart) => {
     const hit = chart.getElementsAtEventForMode(_evt, "index", { intersect: false }, true)[0];
@@ -300,22 +343,30 @@ function prevMedian(row, idx) {
 function buildCandles(data) {
   return ["en", "ko", "zh"].map((lang) => {
     const row = data.languages[lang];
+    let last = null;
     return data.dates.map((_, i) => {
       const close = row.median[i];
       const open = prevMedian(row, i);
-      if (close == null && row.high[i] == null && row.low[i] == null) return null;
-      const c = close ?? open;
-      const o = open ?? c;
-      if (o == null || c == null) return null;
-      const high = row.high[i] != null ? row.high[i] : Math.max(o, c);
-      const low = row.low[i] != null ? row.low[i] : Math.min(o, c);
-      return {
-        o,
-        c,
-        h: Math.max(high, o, c),
-        l: Math.min(low, o, c),
-        up: c >= o,
-      };
+      let candle = null;
+      if (close == null && row.high[i] == null && row.low[i] == null) {
+        if (last) candle = { o: last.c, c: last.c, h: last.c, l: last.c, up: true };
+      } else {
+        const c = close ?? open ?? last?.c;
+        const o = open ?? c;
+        if (o != null && c != null) {
+          const high = row.high[i] != null ? row.high[i] : Math.max(o, c);
+          const low = row.low[i] != null ? row.low[i] : Math.min(o, c);
+          candle = {
+            o,
+            c,
+            h: Math.max(high, o, c),
+            l: Math.min(low, o, c),
+            up: c >= o,
+          };
+        }
+      }
+      if (candle) last = candle;
+      return candle;
     });
   });
 }
@@ -422,6 +473,9 @@ const chartCrosshair = {
     if (index == null) return;
     const y = event.y >= area.top && event.y <= area.bottom ? event.y : null;
     applyCrosshair(index, chart, y);
+    if ((event.type === "click" || event.type === "touchstart") && state.series?.dates?.[index]) {
+      selectDay(state.series.dates[index]);
+    }
     args.changed = true;
   },
   afterDatasetsDraw(chart) {
@@ -450,6 +504,10 @@ const chartCrosshair = {
 };
 
 function renderCharts(data) {
+  if (typeof Chart === "undefined" || window.__chartLoadError) {
+    $("collectStatus").textContent = "Chart library failed to load.";
+    return;
+  }
   const labels = data.dates.map(shortDate);
   const candles = buildCandles(data);
   const volumeSets = [];
@@ -521,7 +579,7 @@ function renderCharts(data) {
           editionCandles: { candles: [candles[li]], langs: [lang] },
         },
         scales: {
-          x: { ...axisStyle(), offset: true },
+          x: xAxis(data),
           y: {
             ...axisStyle(),
             min: bounds.min,
@@ -560,7 +618,7 @@ function renderCharts(data) {
         bar: { categoryPercentage: 0.72, barPercentage: 0.88 },
       },
       scales: {
-        x: { stacked: false, offset: true, ...axisStyle() },
+        x: { stacked: false, ...xAxis(data) },
         y: {
           stacked: false,
           beginAtZero: true,
@@ -659,38 +717,56 @@ async function loadMarkets() {
 }
 
 async function selectDay(day) {
+  const gen = ++listingGen;
   state.selectedDay = day;
   $("selectedDay").textContent = day;
+  const lang = state.listingLang;
   let rows;
   if (mode === "static") {
-    rows = filterRows(snapshot?.listings?.[state.sku]?.[day] || []);
+    const packed = snapshot?.listings?.[state.sku]?.[day];
+    if (Array.isArray(packed)) {
+      rows = filterRows(packed).filter((row) => (row.language || "") === lang);
+    } else {
+      rows = filterRows(packed?.[lang] || []);
+    }
   } else {
     const params = new URLSearchParams({
       day,
       sku: state.sku,
+      language: lang,
       marketplaces: state.marketplaces,
+      limit: "100",
     });
     const res = await fetch(`/api/listings?${params}`);
+    if (!res.ok) {
+      if (gen !== listingGen) return;
+      $("listingBody").innerHTML = `<tr><td colspan="5" class="muted">Could not load listings (${res.status}).</td></tr>`;
+      return;
+    }
     rows = await res.json();
   }
+  if (gen !== listingGen) return;
+  if (!Array.isArray(rows)) rows = [];
+  rows = [...rows].sort(
+    (a, b) => (a.price_aud ?? a.price_usd ?? 0) - (b.price_aud ?? b.price_usd ?? 0)
+  );
   const body = $("listingBody");
+  const label = LANGS[lang]?.label || lang.toUpperCase();
   if (!rows.length) {
-    body.innerHTML = `<tr><td colspan="6" class="muted">No kept listings for this date.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="5" class="muted">No kept ${escapeHtml(label)} listings for this date.</td></tr>`;
     return;
   }
   body.innerHTML = rows
     .map((row) => {
-      const langClass = `lang-${row.language}`;
       const title = row.source === "seed"
-        ? `${row.title} <span class="muted">(seed)</span>`
-        : `<a href="${row.url}" target="_blank" rel="noreferrer">${escapeHtml(row.title)}</a>`;
+        ? `${escapeHtml(row.title)} <span class="muted">(seed)</span>`
+        : `<a href="${safeUrl(row.url)}" target="_blank" rel="noreferrer">${escapeHtml(row.title)}</a>`;
       return `<tr>
-        <td class="${langClass}">${(row.language || "").toUpperCase()}</td>
-        <td>${row.marketplace}</td>
+        <td>${escapeHtml(row.marketplace)}</td>
         <td>${title}</td>
-        <td>${Number(row.price_native).toLocaleString()} ${row.currency}</td>
+        <td>${Number(row.price_native).toLocaleString()} ${escapeHtml(row.currency)}</td>
         <td>${fmtAud(row.price_aud ?? row.price_usd)}</td>
-        <td>${row.listing_type}</td>
+        <td>${escapeHtml(row.listing_type)}</td>
       </tr>`;
     })
     .join("");
@@ -727,6 +803,16 @@ function escapeHtml(value) {
     '"': "&quot;",
     "'": "&#39;",
   })[ch]);
+}
+
+function safeUrl(value) {
+  try {
+    const parsed = new URL(String(value), window.location.href);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") return parsed.href;
+  } catch {
+    /* ignore */
+  }
+  return "#";
 }
 
 detectMode()

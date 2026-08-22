@@ -7,15 +7,15 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import desc, func, select
+from sqlalchemy import or_, and_, asc, desc, func, select
 
 from app.aggregator import rebuild_aggregates
-from app.classify import LANG_EN, LANG_KO, LANG_ZH, MSRP, SKU_PLAYER, SKU_SIGNATURE, is_wtb
+from app.classify import ASK_TYPES, LANG_EN, LANG_KO, LANG_ZH, MSRP, SKU_PLAYER, SKU_SIGNATURE, is_wtb
 from app.config import ROOT, settings
 from app.db import CollectRun, DailyAggregate, RawListing, SessionLocal, init_db
 from app.fx import aud_per_usd, convert_amount, to_aud, to_usd
 from app.markets import HOME_MARKETS, MARKETPLACES, expand_marketplaces, search_catalog
-from app.pipeline import reclassify_editions, run_collection, scrub_buyer_posts
+from app.pipeline import CollectBusy, reclassify_editions, run_collection, scrub_buyer_posts
 from app.scheduler import next_run_iso, start_scheduler
 from app.seed import ensure_ask_seed, ensure_xianyu_snapshot
 from app.stats import iqr_keep, median
@@ -37,26 +37,37 @@ app.add_middleware(
 @app.on_event("startup")
 def on_startup() -> None:
     init_db()
-    inserted = ensure_ask_seed()
-    if inserted:
-        log.info("Seeded %s seller-ask listings so the chart is usable before live scrapes", inserted)
-    dropped = scrub_buyer_posts()
-    if dropped:
-        log.info("Dropped %s want-to-buy posts that were stored as asks", dropped)
-    relabeled = reclassify_editions()
-    if relabeled:
-        log.info("Relabeled %s listings to product edition language", relabeled)
-    snap = ensure_xianyu_snapshot()
-    if snap:
-        log.info("Applied %s Xianyu / Goofish snapshot asks", snap)
+
+    def _step(label: str, fn):
+        try:
+            result = fn()
+            if result:
+                log.info("%s: %s", label, result)
+        except Exception:
+            log.exception("%s failed; continuing startup", label)
+
+    _step("seed", ensure_ask_seed)
+    _step("scrub bids", scrub_buyer_posts)
+    _step("reclassify", reclassify_editions)
+    _step("xianyu snapshot", ensure_xianyu_snapshot)
     session = SessionLocal()
     try:
         rebuild_aggregates(session)
+    except Exception:
+        log.exception("Startup aggregate rebuild failed")
     finally:
         session.close()
-    start_scheduler()
+    try:
+        start_scheduler()
+    except Exception:
+        log.exception("Scheduler failed to start")
     if settings.collect_on_startup:
-        run_collection()
+        try:
+            run_collection()
+        except CollectBusy:
+            log.warning("Startup collect skipped; already running")
+        except Exception:
+            log.exception("Startup collect failed")
 
 
 def _session():
@@ -65,7 +76,16 @@ def _session():
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "phase": "presale", "shipped": False}
+    try:
+        session = _session()
+        try:
+            session.scalar(select(func.count()).select_from(RawListing))
+        finally:
+            session.close()
+        return {"ok": True, "phase": "presale", "shipped": False, "db": True}
+    except Exception:
+        log.exception("Health check failed")
+        return {"ok": False, "phase": "presale", "shipped": False, "db": False}
 
 
 @app.get("/api/series")
@@ -109,8 +129,9 @@ def series(
         payload["phase"] = "presale"
         payload["note"] = (
             "Headline prices are the median completed sale in the last 24 hours "
-            "on each edition's home marketplaces. Buyer bids / want-to-buy posts "
-            "(삽니다, 구매, WTB) are excluded."
+            "on each edition's home marketplaces. If there are no home-market "
+            "sales, the card uses today's median ask. Buyer bids / want-to-buy "
+            "posts (삽니다, 구매, WTB) are excluded."
         )
         payload = _apply_aud(session, payload, sku, end)
         cheapest = _cheapest_by_language(session, sku, mp_filter)
@@ -147,20 +168,22 @@ def _series_from_listings(session, sku: str, start: date, end: date, marketplace
             RawListing.kept.is_(True),
             RawListing.sku == sku,
             RawListing.listing_type.in_(("active", "presale", "sold")),
-            RawListing.observed_on >= start,
-            RawListing.observed_on <= end,
             RawListing.marketplace.in_(marketplaces),
             RawListing.language.in_([LANG_EN, LANG_KO, LANG_ZH]),
+            or_(
+                RawListing.observed_on.between(start, end),
+                RawListing.last_seen_on.between(start, end),
+            ),
         )
     ).all()
     ask_buckets: dict[tuple, list[float]] = defaultdict(list)
     sold_buckets: dict[tuple, int] = defaultdict(int)
     for row in rows:
-        key = (row.observed_on, row.language)
         if row.listing_type == "sold":
-            sold_buckets[key] += 1
+            sold_buckets[(row.observed_on, row.language)] += 1
         else:
-            ask_buckets[key].append(row.price_usd)
+            ask_day = row.last_seen_on or row.observed_on
+            ask_buckets[(ask_day, row.language)].append(row.price_usd)
     by_lang = {LANG_EN: {}, LANG_KO: {}, LANG_ZH: {}}
     keys = set(ask_buckets) | set(sold_buckets)
     for day, language in keys:
@@ -185,14 +208,44 @@ def _fill_days(by_lang: dict, start: date, end: date) -> dict:
         cursor += timedelta(days=1)
     languages = {}
     for lang in (LANG_EN, LANG_KO, LANG_ZH):
-        languages[lang] = {
-            "median": [by_lang.get(lang, {}).get(d, {}).get("median") for d in dates],
-            "high": [by_lang.get(lang, {}).get(d, {}).get("high") for d in dates],
-            "low": [by_lang.get(lang, {}).get(d, {}).get("low") for d in dates],
-            "volume": [by_lang.get(lang, {}).get(d, {}).get("volume") or 0 for d in dates],
-            "sold_volume": [by_lang.get(lang, {}).get(d, {}).get("sold_volume") or 0 for d in dates],
-        }
+        languages[lang] = _carry_price_gaps(
+            {
+                "median": [by_lang.get(lang, {}).get(d, {}).get("median") for d in dates],
+                "high": [by_lang.get(lang, {}).get(d, {}).get("high") for d in dates],
+                "low": [by_lang.get(lang, {}).get(d, {}).get("low") for d in dates],
+                "volume": [by_lang.get(lang, {}).get(d, {}).get("volume") or 0 for d in dates],
+                "sold_volume": [by_lang.get(lang, {}).get(d, {}).get("sold_volume") or 0 for d in dates],
+            }
+        )
     return {"dates": dates, "languages": languages}
+
+
+def _carry_price_gaps(row: dict) -> dict:
+    """Keep interior empty days on the last known ask so candlesticks do not vanish."""
+    last_m = last_h = last_l = None
+    medians: list[float | None] = []
+    highs: list[float | None] = []
+    lows: list[float | None] = []
+    for median, high, low in zip(row["median"], row["high"], row["low"]):
+        if median is not None or high is not None or low is not None:
+            last_m = median if median is not None else last_m
+            last_h = high if high is not None else last_h
+            last_l = low if low is not None else last_l
+            medians.append(median if median is not None else last_m)
+            highs.append(high if high is not None else last_h)
+            lows.append(low if low is not None else last_l)
+        elif last_m is not None:
+            medians.append(last_m)
+            highs.append(last_m)
+            lows.append(last_m)
+        else:
+            medians.append(None)
+            highs.append(None)
+            lows.append(None)
+    row["median"] = medians
+    row["high"] = highs
+    row["low"] = lows
+    return row
 
 
 def _apply_aud(session, payload: dict, sku: str, day: date) -> dict:
@@ -236,16 +289,31 @@ def listings(
     sku: str = Query(default=SKU_SIGNATURE),
     language: str | None = None,
     marketplaces: str = Query(default="ALL"),
-    limit: int = Query(default=40, ge=1, le=200),
+    limit: int = Query(default=100, ge=1, le=500),
 ):
+    if sku not in {SKU_SIGNATURE, SKU_PLAYER}:
+        raise HTTPException(400, "sku must be signature or player_bundle")
+    if language and language not in {LANG_EN, LANG_KO, LANG_ZH}:
+        raise HTTPException(400, "language must be en, ko, or zh")
     session = _session()
     try:
         stmt = select(RawListing).where(
             RawListing.kept.is_(True),
             RawListing.sku == sku,
-            RawListing.observed_on == day,
             RawListing.listing_type.in_(("active", "presale", "sold")),
         )
+        today = date.today()
+        if day >= today:
+            stmt = stmt.where(
+                or_(
+                    RawListing.last_seen_on == day,
+                    and_(RawListing.last_seen_on.is_(None), RawListing.observed_on == day),
+                )
+            )
+        else:
+            stmt = stmt.where(
+                or_(RawListing.observed_on == day, RawListing.last_seen_on == day)
+            )
         if language:
             stmt = stmt.where(RawListing.language == language)
         if marketplaces.upper() != "ALL":
@@ -253,7 +321,7 @@ def listings(
                 [m.strip() for m in marketplaces.split(",") if m.strip()]
             )
             stmt = stmt.where(RawListing.marketplace.in_(selected))
-        rows = session.scalars(stmt.order_by(desc(RawListing.price_usd)).limit(limit)).all()
+        rows = session.scalars(stmt.order_by(asc(RawListing.price_usd)).limit(limit)).all()
         return [_listing_payload(session, row, day) for row in rows]
     finally:
         session.close()
@@ -315,7 +383,7 @@ def _pack_sold_median(session, rows: list[RawListing], day: date, *, stale: bool
     return {
         "price_usd": round(med, 2),
         "price_aud": to_aud(session, med, day),
-        "sample_count": len(rows),
+        "sample_count": len(clean),
         "marketplaces": sorted({row.marketplace for row in rows}),
         "currency": native_row.currency,
         "price_native": native_row.price_native,
@@ -323,7 +391,31 @@ def _pack_sold_median(session, rows: list[RawListing], day: date, *, stale: bool
         "stale": stale,
         "as_of": (as_of or max(row.observed_on for row in rows)).isoformat(),
         "source": "live" if any(row.source != "seed" for row in rows) else "seed",
+        "kind": "sold",
     }
+
+
+def _ask_query(session, sku: str, lang: str, markets: list[str] | None, day: date):
+    filters = [
+        RawListing.kept.is_(True),
+        RawListing.sku == sku,
+        RawListing.language == lang,
+        RawListing.listing_type.in_(ASK_TYPES),
+        RawListing.observed_on == day,
+        RawListing.source != "seed",
+    ]
+    if markets:
+        filters.append(RawListing.marketplace.in_(markets))
+    return session.scalars(select(RawListing).where(*filters)).all()
+
+
+def _pack_ask_median(session, rows: list[RawListing], day: date) -> dict | None:
+    packed = _pack_sold_median(session, rows, day, stale=False, as_of=day, window_hours=None)
+    if not packed:
+        return None
+    packed["kind"] = "ask"
+    packed["stale"] = False
+    return packed
 
 
 def _sold_query(session, sku: str, lang: str, markets: list[str] | None, live_only: bool):
@@ -343,11 +435,13 @@ def _sold_query(session, sku: str, lang: str, markets: list[str] | None, live_on
 
 
 def _median_sold_24h(session, sku: str, mp_filter: list[str], day: date) -> dict:
-    """24h median sold, else the last printed sold median for that edition."""
+    """24h median sold, else last live sold, else today's home-market ask median."""
     cutoff = _sold_window_start()
     out: dict = {}
     for lang in (LANG_EN, LANG_KO, LANG_ZH):
-        markets = None if mp_filter == ["ALL"] else mp_filter
+        # Match the ask series: ALL uses each edition's home markets, so eBay
+        # Chinese-edition boxes do not set the China headline.
+        markets = list(HOME_MARKETS[lang]) if mp_filter == ["ALL"] else mp_filter
         live = _sold_query(session, sku, lang, markets, live_only=True)
         in_window = [row for row in live if _sold_at(row) >= cutoff]
         packed = _pack_sold_median(session, in_window, day, stale=False, window_hours=24)
@@ -360,6 +454,10 @@ def _median_sold_24h(session, sku: str, mp_filter: list[str], day: date) -> dict
             out[lang] = _pack_sold_median(
                 session, last_day, day, stale=True, as_of=latest, window_hours=None
             )
+            continue
+        asks = _ask_query(session, sku, lang, markets, day)
+        if asks:
+            out[lang] = _pack_ask_median(session, asks, day)
             continue
         seed = _sold_query(session, sku, lang, markets, live_only=False)
         if seed:
@@ -407,7 +505,13 @@ def _cheapest_row(
         filters.append(RawListing.currency == currency)
     rows = session.scalars(
         select(RawListing)
-        .where(*filters, RawListing.observed_on >= date.today() - timedelta(days=2))
+        .where(*filters, or_(
+            RawListing.last_seen_on >= date.today() - timedelta(days=2),
+            and_(
+                RawListing.last_seen_on.is_(None),
+                RawListing.observed_on >= date.today() - timedelta(days=2),
+            ),
+        ))
         .order_by(RawListing.price_usd.asc())
     ).all()
     if not rows:
@@ -469,7 +573,13 @@ def status():
 
 @app.post("/api/collect")
 def collect_now():
-    reports = run_collection()
+    try:
+        reports = run_collection(block=False)
+    except CollectBusy:
+        raise HTTPException(status_code=409, detail="Collection already running")
+    except Exception:
+        log.exception("Collect endpoint failed")
+        raise HTTPException(status_code=500, detail="Collection failed")
     return {"ok": True, "reports": reports}
 
 

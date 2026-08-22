@@ -10,8 +10,11 @@
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="styles.css?v=15" />
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="styles.css?v=18" />
+    <script
+      src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"
+      onerror="window.__chartLoadError=true"
+    ></script>
   </head>
   <body>
     <div class="frame">
@@ -23,6 +26,7 @@
             English, Korean, and Chinese *editions* as three AUD series
             (not the language the listing is written in).
             Headline cards use the median completed sale in the last 24 hours.
+            If an edition has no home-market sales yet, the card uses today's median ask.
             Buyer bids (삽니다 / 구매 / WTB) are excluded.
           </p>
         </div>
@@ -34,6 +38,7 @@
 
       <section class="banner" id="phaseBanner">
         Headline numbers are the median sold price over the last 24 hours on each edition's home marketplaces, refreshed hourly.
+        If there are no home-market sales, the card uses today's median ask.
         Want-to-buy posts (구매 / 삽니다 / 求购 / WTB) are dropped.
       </section>
 
@@ -78,7 +83,7 @@
         <p class="muted chart-note">
           One chart per edition, each on its own AUD scale so English highs do not flatten Korean and Chinese.
           Body is previous median → today's median; wick is that day's high / low ask.
-          Hollow body means the median fell.
+          Hollow body means the median fell. Days with no new asks keep the previous median.
         </p>
         <div class="price-charts">
           <div>
@@ -130,13 +135,17 @@
       <section class="table-wrap">
         <div class="table-head">
           <h2>Listings for <span id="selectedDay">—</span></h2>
-          <p class="muted">Tap or drag a date on a chart. Values are converted to AUD using that day's FX snapshot.</p>
+          <p class="muted">Tap or drag a date on a chart. Cheapest kept ask first. Values are converted to AUD using that day's FX snapshot.</p>
+        </div>
+        <div class="pills listing-tabs" id="listingLangPills">
+          <button class="pill lang-en on" type="button" data-lang="en">English</button>
+          <button class="pill lang-ko" type="button" data-lang="ko">Korean</button>
+          <button class="pill lang-zh" type="button" data-lang="zh">Chinese</button>
         </div>
         <div class="table-scroll">
           <table>
             <thead>
               <tr>
-                <th>Lang</th>
                 <th>Market</th>
                 <th>Title</th>
                 <th>Native</th>
@@ -146,7 +155,7 @@
             </thead>
             <tbody id="listingBody">
               <tr>
-                <td colspan="6" class="muted">Select a date.</td>
+                <td colspan="5" class="muted">Select a date.</td>
               </tr>
             </tbody>
           </table>
@@ -166,6 +175,6 @@
         <span id="runMeta">Collectors refresh every hour. Failures are isolated per marketplace.</span>
       </footer>
     </div>
-    <script src="app.js?v=15"></script>
+    <script src="app.js?v=18"></script>
   </body>
 </html>

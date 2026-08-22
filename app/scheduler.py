@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
-from app.pipeline import run_collection
+from app.pipeline import CollectBusy, run_collection
 
 log = logging.getLogger(__name__)
 _scheduler: BackgroundScheduler | None = None
@@ -46,5 +46,7 @@ def _job() -> None:
 
         run_collection()
         ensure_xianyu_snapshot()
+    except CollectBusy:
+        log.warning("Hourly collection skipped; already running")
     except Exception:
         log.exception("Hourly collection failed")

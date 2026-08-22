@@ -50,6 +50,8 @@ def refresh_fx(session: Session, day: date | None = None) -> dict[str, float]:
         for currency, per_usd in fx.items():
             if per_usd:
                 rates[currency] = 1.0 / float(per_usd)
+        for currency, fallback in FALLBACK_USD_PER_UNIT.items():
+            rates.setdefault(currency, fallback)
         log.info("FX refresh %s: %s", day, {k: round(v, 6) for k, v in rates.items()})
     except Exception as exc:
         log.warning("FX API failed (%s); using last stored / fallback rates", exc)

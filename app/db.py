@@ -10,6 +10,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     create_engine,
+    event,
     text,
 )
 
@@ -41,6 +42,7 @@ class RawListing(Base):
     url: Mapped[str] = mapped_column(Text)
     scraped_at: Mapped[datetime] = mapped_column(DateTime, index=True)
     observed_on: Mapped[date] = mapped_column(Date, index=True)
+    last_seen_on: Mapped[date | None] = mapped_column(Date, index=True, nullable=True)
     source: Mapped[str] = mapped_column(String(16), default="live")
     kept: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     reject_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -106,9 +108,28 @@ engine = make_engine()
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 
 
+@event.listens_for(engine, "connect")
+def _sqlite_pragmas(dbapi_connection, _connection_record) -> None:
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=60000")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
+
+
+def checkpoint_wal() -> None:
+    with engine.begin() as conn:
+        conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+
+
 def init_db() -> None:
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
-        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(daily_aggregates)"))}
-        if "sold_volume" not in cols:
+        agg_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(daily_aggregates)"))}
+        if "sold_volume" not in agg_cols:
             conn.execute(text("ALTER TABLE daily_aggregates ADD COLUMN sold_volume INTEGER DEFAULT 0"))
+        listing_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(raw_listings)"))}
+        if "last_seen_on" not in listing_cols:
+            conn.execute(text("ALTER TABLE raw_listings ADD COLUMN last_seen_on DATE"))
+            conn.execute(text("UPDATE raw_listings SET last_seen_on = observed_on WHERE last_seen_on IS NULL"))

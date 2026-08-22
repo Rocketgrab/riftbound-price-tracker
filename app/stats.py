@@ -7,7 +7,7 @@ from app.classify import SKU_PLAYER, SKU_SIGNATURE
 
 
 def iqr_keep(values: list[float]) -> list[float]:
-    if len(values) < 4:
+    if len(values) < 8:
         return values
     ordered = sorted(values)
     q1 = statistics.quantiles(ordered, n=4, method="inclusive")[0]

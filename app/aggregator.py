@@ -31,25 +31,43 @@ def rebuild_aggregates(session: Session, day: date | None = None) -> int:
         if row.language not in LANGS or row.sku not in SKUS:
             continue
         keys = [(row.observed_on, row.marketplace, row.sku, row.language)]
+        # Live asks belong on the last-seen day so re-scrapes do not empty "today".
+        if row.listing_type != "sold":
+            ask_day = row.last_seen_on or row.observed_on
+            keys = [(ask_day, row.marketplace, row.sku, row.language)]
         # Language series for "ALL" is the home market only, so eBay asks for
         # Korean/Chinese copies cannot pull those medians up.
         if row.marketplace in HOME_MARKETS.get(row.language, ()):
-            keys.append((row.observed_on, "ALL", row.sku, row.language))
+            keys.append((keys[0][0], "ALL", row.sku, row.language))
         for key in keys:
             if row.listing_type == "sold":
                 sold_buckets[key] += 1
             else:
                 ask_buckets[key].append(row.price_usd)
 
-    written = 0
-    if day:
-        session.execute(delete(DailyAggregate).where(DailyAggregate.date == day))
-    else:
-        session.execute(delete(DailyAggregate))
-
     keys = set(ask_buckets) | set(sold_buckets)
+    listing_dates = {key[0] for key in keys}
+    today = date.today()
+    existing_dates = set(session.scalars(select(DailyAggregate.date).distinct()).all())
+
+    # Re-scrapes move active listings onto "today". Wiping every aggregate row
+    # would erase historical candles. Freeze days already stored; rewrite today
+    # and any date that still has listings but no snapshot yet (seed / solds).
+    if day:
+        dates_to_write = {day}
+    elif not existing_dates:
+        dates_to_write = listing_dates or {today}
+    else:
+        dates_to_write = {today} | (listing_dates - existing_dates)
+
+    if dates_to_write:
+        session.execute(delete(DailyAggregate).where(DailyAggregate.date.in_(dates_to_write)))
+
+    written = 0
     for key in keys:
         agg_date, marketplace, sku, language = key
+        if agg_date not in dates_to_write:
+            continue
         prices = ask_buckets.get(key) or []
         clean = iqr_keep(prices) if prices else []
         session.add(

@@ -10,7 +10,7 @@ This version:
 - Splits **Signature Edition** vs **Player Bundle** (different MSRPs: $360 vs $70).
 - Splits **EN / KR / CN** language editions as three colored median lines.
 - Displays market prices in **AUD** (native currency is kept on listings).
-- Price band allows current secondary asks (~₩1,000,000 KR, ~A$3,000–5,000 eBay, ~¥5,700–6,500 Xianyu).
+- Price band allows current secondary asks (~₩1,000,000 KR, ~A$3,000–5,000 eBay, ~¥4,000–6,000 Xianyu).
 - Converts KRW/CNY/USD with a **daily FX snapshot**, then to AUD.
 - Shows marketplace search links and the **cheapest kept ask**, refreshed hourly.
 - Lets each marketplace collector fail on its own. The rest of the job still writes.

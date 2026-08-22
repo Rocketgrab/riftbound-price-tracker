@@ -43,7 +43,7 @@ LANG_META = {
     },
     LANG_ZH: {
         "marketplace_weights": [("xianyu", 1.0)],
-        "native": {"xianyu": ("CNY", 6000.0)},
+        "native": {"xianyu": ("CNY", 4500.0)},
         "titles": {
             "xianyu": "符文战场 T1 签名版 中文 在售",
         },
@@ -102,7 +102,7 @@ def ensure_ask_seed(session: Session | None = None) -> int:
                 row.marketplace == "xianyu"
                 and row.sku == SKU_SIGNATURE
                 and row.currency == "CNY"
-                and row.price_native < 5200
+                and row.price_native < 2800
                 for row in seed_rows
             )
             or not any(row.listing_type == "sold" for row in seed_rows)
@@ -182,6 +182,7 @@ def seed_if_empty(session: Session | None = None, force: bool = False) -> int:
                             url=search_url_for(marketplace, currency),
                             scraped_at=datetime.combine(day, datetime.min.time()),
                             observed_on=day,
+                            last_seen_on=day,
                             source="seed",
                             kept=True,
                             reject_reason=None,
@@ -216,6 +217,7 @@ def seed_if_empty(session: Session | None = None, force: bool = False) -> int:
                                 url=search_url_for(marketplace, currency),
                                 scraped_at=datetime.combine(day, datetime.min.time()),
                                 observed_on=day,
+                                last_seen_on=day,
                                 source="seed",
                                 kept=True,
                                 reject_reason=None,
@@ -253,6 +255,7 @@ def seed_if_empty(session: Session | None = None, force: bool = False) -> int:
                             url=search_url_for(marketplace, native_ccy),
                             scraped_at=datetime.combine(day, datetime.min.time()),
                             observed_on=day,
+                            last_seen_on=day,
                             source="seed",
                             kept=True,
                         )
@@ -268,15 +271,15 @@ def seed_if_empty(session: Session | None = None, force: bool = False) -> int:
             session.close()
 
 
-# Visible Goofish / Xianyu asks for 符文战场T1 on 19 Aug 2026.
+# Visible Goofish / Xianyu asks for 符文战场T1 on 22 Aug 2026.
 # Individual item IDs are not in the search-grid capture, so cheapest links
 # point at the live search until the collector can scrape item pages.
 XIANYU_VISIBLE_ASKS = [
-    {"id": "goofish-5700", "price": 5700.0, "title": "符文战场 T1 2025 World Championship"},
-    {"id": "goofish-5999", "price": 5999.0, "title": "限定 符文战场 T1 2025 World Championship"},
-    {"id": "goofish-6000", "price": 6000.0, "title": "符文战场 T1 + 2025 World Championship Winner"},
-    {"id": "goofish-6500-a", "price": 6500.0, "title": "符文战场 T1 2025 World Championship"},
-    {"id": "goofish-6500-b", "price": 6500.0, "title": "符文战场 T1 礼盒 2025 World Championship"},
+    {"id": "goofish-3999", "price": 3999.0, "title": "符文战场 T1 2025 World Championship Winner 礼盒 全新未拆"},
+    {"id": "goofish-4600", "price": 4600.0, "title": "符文战场 T1 2025 World Championship 礼盒"},
+    {"id": "goofish-4888", "price": 4888.0, "title": "符文战场 T1 2025 World Championship 礼盒"},
+    {"id": "goofish-5000", "price": 5000.0, "title": "符文战场 T1 2025 World Championship 礼盒"},
+    {"id": "goofish-5888", "price": 5888.0, "title": "符文战场 T1 2025 World Championship 礼盒"},
 ]
 
 
@@ -298,11 +301,24 @@ def ensure_xianyu_snapshot(session: Session | None = None) -> int:
                 RawListing.marketplace == "xianyu",
                 RawListing.source == "live",
                 RawListing.kept.is_(True),
-                RawListing.observed_on == today,
+                RawListing.listing_type.in_(("active", "presale")),
+                RawListing.last_seen_on == today,
             )
         ) or 0
-        if live_today:
+        # A single blocked/junk live row must not replace the Goofish snapshot.
+        if live_today >= 3:
             return 0
+
+        wanted = {item["id"] for item in XIANYU_VISIBLE_ASKS}
+        stale_snap = session.scalars(
+            select(RawListing).where(
+                RawListing.marketplace == "xianyu",
+                RawListing.source == "snapshot",
+                RawListing.external_id.notin_(wanted),
+            )
+        ).all()
+        for row in stale_snap:
+            session.delete(row)
 
         written = 0
         now = datetime.now()
@@ -324,6 +340,7 @@ def ensure_xianyu_snapshot(session: Session | None = None) -> int:
                 url=GOOFISH_T1_SEARCH,
                 scraped_at=now,
                 observed_on=today,
+                last_seen_on=today,
                 source="snapshot",
                 kept=True,
                 reject_reason=None,

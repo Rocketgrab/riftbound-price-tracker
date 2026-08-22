@@ -104,6 +104,23 @@ button {
   color: #fff;
 }
 
+.listing-tabs { margin: 10px 0 12px; }
+.listing-tabs .pill.lang-en.on {
+  background: #152038;
+  border-color: var(--en);
+  color: #fff;
+}
+.listing-tabs .pill.lang-ko.on {
+  background: #2a1c1c;
+  border-color: var(--ko);
+  color: #fff;
+}
+.listing-tabs .pill.lang-zh.on {
+  background: #2a2414;
+  border-color: var(--zh);
+  color: #fff;
+}
+
 .check {
   display: flex;
   align-items: center;

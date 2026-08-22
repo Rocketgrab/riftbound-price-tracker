@@ -6,7 +6,7 @@ from pathlib import Path
 
 from app.aggregator import rebuild_aggregates
 from app.config import ROOT
-from app.db import SessionLocal, init_db
+from app.db import SessionLocal, checkpoint_wal, init_db
 from app.main import listings, markets, series, status
 from app.pipeline import reclassify_editions, scrub_buyer_posts
 from app.seed import ensure_ask_seed, ensure_xianyu_snapshot
@@ -51,12 +51,20 @@ def export_snapshot() -> Path:
         end = date.today()
         cursor = end - timedelta(days=59)
         while cursor <= end:
-            snapshot["listings"][sku][cursor.isoformat()] = listings(
-                day=cursor, sku=sku, marketplaces="ALL", limit=200
-            )
+            snapshot["listings"][sku][cursor.isoformat()] = {
+                lang: listings(
+                    day=cursor,
+                    sku=sku,
+                    language=lang,
+                    marketplaces="ALL",
+                    limit=100,
+                )
+                for lang in ("en", "ko", "zh")
+            }
             cursor += timedelta(days=1)
     path = OUT / "snapshot.json"
     path.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+    checkpoint_wal()
     return path
 
 
